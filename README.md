@@ -1,31 +1,37 @@
-# QML Gauges MCP Server
+# DevDash MCP Server
 
-Model Context Protocol (MCP) server providing Claude Code with window inspection and screenshot capture for QML Gauges applications.
+Model Context Protocol (MCP) server providing Claude Code with tools for DevDash development and debugging.
 
 ## Architecture
 
 ```
 Claude Code CLI
-      |
-      | MCP Protocol (stdio)
-      v
-+---------------------------+
-| qmlgauges-mcp (Python)    |
-| - qmlgauges_list_windows  |
-| - qmlgauges_screenshot    |
-+------------+--------------+
-             | X11 Commands (xwininfo, wmctrl, import/scrot)
-             v
-+---------------------------+
-| X11 Window System         |
-| - QML Gauges Explorer     |
-| - QML Gauges Examples     |
-+---------------------------+
+      │
+      │ MCP Protocol (stdio)
+      ▼
+┌─────────────────────────────────────────┐
+│         devdash-mcp (Python)            │
+│                                         │
+│  ┌─────────────┐  ┌─────────────────┐   │
+│  │ qml-gauges  │  │   Screenshot    │   │
+│  │ (WebSocket) │  │     (X11)       │   │
+│  └──────┬──────┘  └────────┬────────┘   │
+│         │                  │            │
+│  ┌──────┴──────┐  ┌────────┴────────┐   │
+│  │   devdash   │  │    devdash      │   │
+│  │ (Telemetry) │  │    (Logs)       │   │
+│  └─────────────┘  └─────────────────┘   │
+└─────────────────────────────────────────┘
+         │                    │
+         ▼                    ▼
+┌─────────────────┐  ┌─────────────────┐
+│  QML Gauges     │  │    DevDash      │
+│   Explorer      │  │  (DevTools)     │
+│  (port 9876)    │  │  (port 18080)   │
+└─────────────────┘  └─────────────────┘
 ```
 
 ## Installation
-
-From the `tools/mcp` directory:
 
 ```bash
 # Install in development mode
@@ -37,124 +43,140 @@ pip install .
 
 ## System Requirements
 
-The MCP server uses X11 tools for window inspection and screenshot capture. Install these dependencies:
-
+For screenshot capture via X11:
 ```bash
 # Ubuntu/Debian
 sudo apt install wmctrl imagemagick scrot
-
-# The server will work with either:
-# - imagemagick (preferred, uses 'import' command)
-# - scrot (fallback)
 ```
 
 ## Configuration
 
-Add to `.claude/mcp.json` in the qml-gauges project root:
+Add to `.mcp.json` in your project root:
 
 ```json
 {
   "mcpServers": {
-    "qmlgauges": {
+    "devdash": {
       "command": "python",
-      "args": ["-m", "qmlgauges_mcp"],
-      "cwd": "/home/dev/Projects/personal/devdash/qml-gauges/tools/mcp"
+      "args": ["-m", "src.server"],
+      "cwd": "/path/to/devdash-mcp"
     }
   }
 }
 ```
 
-## MCP Tools
+### Environment Variables
 
-### `qmlgauges_list_windows`
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DEVDASH_EXPLORER_WS_PORT` | 9876 | Explorer WebSocket port |
+| `DEVDASH_EXPLORER_WS_HOST` | localhost | Explorer WebSocket host |
+| `DEVDASH_DEVTOOLS_PORT` | 18080 | DevTools HTTP API port |
+| `DEVDASH_DEVTOOLS_HOST` | 127.0.0.1 | DevTools HTTP API host |
 
-List available QML Gauges windows for screenshot capture.
+## Available Tools
 
-**Returns**: JSON object with window information
+### qml-gauges repo (QML Gauges Explorer via WebSocket)
 
-**Example**:
-```json
-{
-  "windows": [
-    {
-      "id": "0x3c0000c",
-      "title": "DevDash Gauges Explorer",
-      "width": 1280,
-      "height": 800,
-      "x": 379,
-      "y": 29
-    }
-  ],
-  "total_count": 1
-}
-```
+| Tool | Description |
+|------|-------------|
+| `qml_explorer_get_state` | Get current page and property values |
+| `qml_explorer_navigate` | Navigate to a component page |
+| `qml_explorer_get_property` | Get a single property value |
+| `qml_explorer_set_property` | Set a property value |
+| `qml_explorer_list_properties` | List available properties with metadata |
 
-### `qmlgauges_screenshot`
+### devdash repo (DevDash runtime via HTTP API)
 
-Capture PNG screenshot of a QML Gauges window.
+| Tool | Description |
+|------|-------------|
+| `devdash_telemetry_get_state` | Get current vehicle telemetry (RPM, temps, etc.) |
+| `devdash_telemetry_get_warnings` | Get active warnings and alerts |
+| `devdash_telemetry_list_windows` | List DevDash windows via DevTools |
+| `devdash_telemetry_screenshot` | Capture screenshot via DevTools API |
+| `devdash_logs_get` | Retrieve logs with filtering (level, category, count) |
 
-**Parameters**:
-- `window` (required): Window name to capture (e.g., "explorer", "DevDash Gauges Explorer")
+### System (X11 window capture - works with any window)
 
-**Returns**: PNG image
+| Tool | Description |
+|------|-------------|
+| `screenshot_list_windows` | List available windows |
+| `screenshot_capture` | Capture window as PNG |
 
-**Example usage in Claude Code**:
-```
-Can you show me a screenshot of the explorer window?
-```
-
-The tool performs case-insensitive substring matching on window titles:
-- "explorer" matches "DevDash Gauges Explorer"
-- "gauge" matches any window with "gauge" in the title
-- "qml" matches any QML-related window
-
-## Usage Example
-
-Once configured, Claude Code can directly inspect and screenshot QML Gauges windows:
+## Usage Examples
 
 ```
 User: What QML Gauges windows are open?
-Claude: [uses qmlgauges_list_windows tool] The DevDash Gauges Explorer is running at 1280x800.
+Claude: [uses screenshot_list_windows] The DevDash Gauges Explorer is running.
 
 User: Show me the explorer window
-Claude: [uses qmlgauges_screenshot tool with window="explorer"] Here's the current explorer view...
+Claude: [uses screenshot_capture with window="explorer"] Here's the current view...
+
+User: Navigate to the GaugeTick page
+Claude: [uses qml_explorer_navigate with page="GaugeTick"] Navigated to GaugeTick.
+
+User: What properties are available?
+Claude: [uses qml_explorer_list_properties] Here are the available properties...
+
+User: Set the tick color to red
+Claude: [uses qml_explorer_set_property with name="color", value="#ff0000"] Done.
+
+User: What's the current RPM?
+Claude: [uses devdash_telemetry_get_state] Current RPM is 3500...
+```
+
+## Development
+
+### Project Structure
+
+```
+devdash-mcp/
+├── src/
+│   ├── __init__.py
+│   ├── server.py           # FastMCP entry point
+│   ├── config.py           # Configuration management
+│   └── tools/
+│       ├── __init__.py
+│       ├── explorer.py     # qml-gauges: QML Gauges Explorer (WebSocket)
+│       ├── screenshot.py   # System: X11 window capture
+│       ├── telemetry.py    # devdash: Runtime telemetry (HTTP)
+│       └── logs.py         # devdash: Application logs (HTTP)
+├── pyproject.toml
+└── README.md
+```
+
+### Adding New Tools
+
+1. Create a new file in `src/tools/` or add to existing category
+2. Create a `register_*_tools(mcp: FastMCP)` function
+3. Add import and registration in `src/tools/__init__.py`
+4. Register in `src/server.py`
+
+Example:
+```python
+from mcp.server.fastmcp import FastMCP
+
+def register_my_tools(mcp: FastMCP) -> None:
+    @mcp.tool()
+    def my_tool(param: str) -> dict:
+        """Tool description."""
+        return {"result": param}
 ```
 
 ## Troubleshooting
 
-**"Window not found"**:
-- Use `qmlgauges_list_windows` to see available windows
-- Window matching is case-insensitive and uses substring search
-- Ensure the application window is visible (not minimized)
+**"Cannot connect to QML Gauges Explorer"**
+- Ensure QML Gauges Explorer is running: `cd qml-gauges && ./build/explorer/qml-gauges-explorer`
+- Check WebSocket port (default: 9876)
 
-**"Failed to capture screenshot"**:
-- Ensure either `imagemagick` or `scrot` is installed
-- Check that the window is not minimized or hidden
-- Try running manually: `import -window <id> screenshot.png`
+**"Cannot connect to DevDash"**
+- Ensure DevDash is running: `cd devdash && ./build/dev/devdash --profile profiles/haltech-vcan.json`
+- Check HTTP port (default: 18080)
 
-**No windows listed**:
-- Ensure QML Gauges application is running
-- Check that windows are visible on the current X display
-- Verify `wmctrl -l` shows the windows
+**"Window not found"**
+- Use `screenshot_list_windows` to see available windows
+- Window matching is case-insensitive substring search
 
-## Development
-
-The MCP server uses X11 tools to inspect and capture windows. It doesn't require any modifications to QML applications - it works with any Qt/QML window via the X11 protocol.
-
-To modify or extend:
-1. Edit `qmlgauges_mcp/server.py`
-2. Add new tools in `list_tools()` and `call_tool()`
-3. Use standard X11 tools (xwininfo, wmctrl, xdotool, etc.)
-
-## Comparison with DevDash MCP Server
-
-| Feature | qmlgauges-mcp | devdash-mcp |
-|---------|---------------|-------------|
-| **Architecture** | Direct X11 tools | HTTP bridge to C++ server |
-| **Dependencies** | wmctrl, imagemagick/scrot | Running DevDash application |
-| **Window Detection** | Any X11 window | Only DevDash windows |
-| **Performance** | Fast (direct) | Fast (HTTP localhost) |
-| **State Access** | Screenshot only | Full telemetry access |
-| **Use Case** | Development/debugging | Runtime monitoring |
-
-The qmlgauges-mcp server is simpler because it doesn't need access to application state - it only needs to see and capture windows, which X11 provides for free.
+**"Failed to capture screenshot"**
+- Install `imagemagick` or `scrot`
+- Ensure window is not minimized
