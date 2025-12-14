@@ -51,6 +51,18 @@ sudo apt install wmctrl imagemagick scrot
 
 ## Configuration
 
+### 1. Create local .env file
+
+Copy the example configuration and customize for your setup:
+
+```bash
+cd devdash-mcp
+cp .env.example .env
+# Edit .env with your paths
+```
+
+### 2. Add MCP server to Claude Code
+
 Add to `.mcp.json` in your project root:
 
 ```json
@@ -67,19 +79,25 @@ Add to `.mcp.json` in your project root:
 
 ### Environment Variables
 
+Configuration can be set in `.env` or as environment variables:
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DEVDASH_EXPLORER_WS_PORT` | 9876 | Explorer WebSocket port |
 | `DEVDASH_EXPLORER_WS_HOST` | localhost | Explorer WebSocket host |
 | `DEVDASH_DEVTOOLS_PORT` | 18080 | DevTools HTTP API port |
 | `DEVDASH_DEVTOOLS_HOST` | 127.0.0.1 | DevTools HTTP API host |
+| `DEVDASH_QML_GAUGES_PATH` | (required) | Absolute path to qml-gauges repo |
 
 ## Available Tools
 
-### qml-gauges repo (QML Gauges Explorer via WebSocket)
+### qml-gauges repo (QML Gauges Explorer)
 
 | Tool | Description |
 |------|-------------|
+| `qml_explorer_build` | Build the explorer (cmake configure + build) |
+| `qml_explorer_launch` | Launch explorer with correct library paths |
+| `qml_explorer_kill` | Kill running explorer processes |
 | `qml_explorer_get_state` | Get current page and property values |
 | `qml_explorer_navigate` | Navigate to a component page |
 | `qml_explorer_get_property` | Get a single property value |

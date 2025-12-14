@@ -8,3 +8,7 @@ build/
 *.egg
 .venv/
 venv/
+
+# Local configuration (contains machine-specific paths)
+# Note: .env.example should be committed, only .env is ignored
+/.env

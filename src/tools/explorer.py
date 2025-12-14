@@ -1,13 +1,14 @@
 """QML Gauges Explorer tools - WebSocket communication with the explorer app.
 
 These tools interact with the QML Gauges Explorer from the qml-gauges repository.
-The explorer must be running for these tools to work.
-
-Launch the explorer:
-    cd qml-gauges && ./build/explorer/qml-gauges-explorer
+Includes tools for building, launching, and managing the explorer process,
+as well as property inspection and modification via WebSocket.
 """
 
 import json
+import os
+import signal
+import subprocess
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -140,3 +141,197 @@ def register_explorer_tools(mcp: FastMCP) -> None:
             List of property definitions with metadata
         """
         return _send_request({"action": "listProperties"})
+
+    @mcp.tool()
+    def qml_explorer_build() -> dict[str, Any]:
+        """Build the QML Gauges Explorer (qml-gauges repo).
+
+        Runs cmake configure and build for the explorer. This is required
+        before launching the explorer if the code has changed.
+
+        Requires DEVDASH_QML_GAUGES_PATH to be set in .env or environment.
+
+        Returns:
+            Build result with success status and output
+        """
+        config = get_config()
+        qml_gauges_path = config.qml_gauges_path
+
+        if not qml_gauges_path:
+            return {
+                "success": False,
+                "error": "DEVDASH_QML_GAUGES_PATH not configured. "
+                "Copy .env.example to .env and set the path to your qml-gauges repository.",
+            }
+
+        build_path = os.path.join(qml_gauges_path, "build")
+
+        try:
+            # Run cmake configure if needed
+            if not os.path.exists(os.path.join(build_path, "CMakeCache.txt")):
+                configure_result = subprocess.run(
+                    ["cmake", "-B", "build"],
+                    cwd=qml_gauges_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                if configure_result.returncode != 0:
+                    return {
+                        "success": False,
+                        "error": "CMake configure failed",
+                        "stderr": configure_result.stderr,
+                    }
+
+            # Run cmake build
+            build_result = subprocess.run(
+                ["cmake", "--build", "build", "-j"],
+                cwd=qml_gauges_path,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+
+            if build_result.returncode == 0:
+                return {
+                    "success": True,
+                    "message": "Build completed successfully",
+                    "output": build_result.stdout[-2000:] if len(build_result.stdout) > 2000 else build_result.stdout,
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "Build failed",
+                    "stderr": build_result.stderr[-2000:] if len(build_result.stderr) > 2000 else build_result.stderr,
+                }
+
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": "Build timed out after 5 minutes"}
+        except FileNotFoundError:
+            return {"success": False, "error": "cmake not found in PATH"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def qml_explorer_launch() -> dict[str, Any]:
+        """Launch the QML Gauges Explorer (qml-gauges repo).
+
+        Starts the explorer with the correct library paths. The explorer
+        provides a WebSocket server on port 9876 for property inspection
+        and modification.
+
+        Requires DEVDASH_QML_GAUGES_PATH to be set in .env or environment.
+
+        Returns:
+            Launch result with PID if successful
+        """
+        config = get_config()
+
+        if not config.qml_gauges_path:
+            return {
+                "success": False,
+                "error": "DEVDASH_QML_GAUGES_PATH not configured. "
+                "Copy .env.example to .env and set the path to your qml-gauges repository.",
+            }
+
+        # Check if already running
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", "qml-gauges-explorer"],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                pids = result.stdout.strip().split("\n")
+                return {
+                    "success": True,
+                    "message": "Explorer is already running",
+                    "pids": pids,
+                }
+        except Exception:
+            pass
+
+        # Check executable exists
+        if not os.path.exists(config.explorer_executable):
+            return {
+                "success": False,
+                "error": f"Explorer not found at {config.explorer_executable}. Run qml_explorer_build first.",
+            }
+
+        # Launch with correct library path
+        env = os.environ.copy()
+        existing_lib_path = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = f"{config.explorer_lib_path}:{existing_lib_path}"
+
+        try:
+            process = subprocess.Popen(
+                [config.explorer_executable],
+                cwd=config.qml_gauges_path,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+
+            # Give it a moment to start
+            import time
+            time.sleep(1)
+
+            # Check if it's still running
+            if process.poll() is None:
+                return {
+                    "success": True,
+                    "message": "Explorer launched successfully",
+                    "pid": process.pid,
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "Explorer exited immediately after launch. Check library dependencies.",
+                }
+
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def qml_explorer_kill() -> dict[str, Any]:
+        """Kill the running QML Gauges Explorer (qml-gauges repo).
+
+        Terminates any running explorer processes.
+
+        Returns:
+            Result with number of processes killed
+        """
+        try:
+            # Find explorer processes
+            result = subprocess.run(
+                ["pgrep", "-f", "qml-gauges-explorer"],
+                capture_output=True,
+                text=True,
+            )
+
+            if result.returncode != 0:
+                return {
+                    "success": True,
+                    "message": "No explorer processes running",
+                    "killed": 0,
+                }
+
+            pids = result.stdout.strip().split("\n")
+            killed = 0
+
+            for pid in pids:
+                try:
+                    os.kill(int(pid), signal.SIGTERM)
+                    killed += 1
+                except (ProcessLookupError, ValueError):
+                    pass
+
+            return {
+                "success": True,
+                "message": f"Killed {killed} explorer process(es)",
+                "killed": killed,
+            }
+
+        except Exception as e:
+            return {"success": False, "error": str(e)}
