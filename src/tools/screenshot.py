@@ -89,8 +89,21 @@ def _find_window_by_name(name: str) -> str | None:
     return None
 
 
-def _capture_window(window_id: str) -> bytes | None:
-    """Capture screenshot of window using ImageMagick or scrot."""
+def _capture_window(
+    window_id: str,
+    scale: float = 1.0,
+    crop_center: float | None = None,
+    crop_left: float | None = None,
+) -> bytes | None:
+    """Capture screenshot of window using ImageMagick or scrot.
+
+    Args:
+        window_id: X11 window ID to capture
+        scale: Scale factor (0.1-1.0). Values < 1.0 reduce image size.
+        crop_center: Crop to center portion (0.1-1.0). E.g., 0.5 keeps center 50%.
+        crop_left: Crop to left portion (0.1-1.0). E.g., 0.6 keeps left 60%.
+                   Applied BEFORE crop_center if both specified.
+    """
     # Try ImageMagick's import command
     result = subprocess.run(
         ["import", "-window", window_id, "png:-"],
@@ -99,7 +112,57 @@ def _capture_window(window_id: str) -> bytes | None:
     )
 
     if result.returncode == 0:
-        return result.stdout
+        screenshot_data = result.stdout
+
+        # Apply left crop first (for extracting preview pane from explorer)
+        if crop_left is not None and crop_left < 1.0:
+            crop_percent = int(crop_left * 100)
+            crop_result = subprocess.run(
+                [
+                    "convert", "png:-",
+                    "-gravity", "West",
+                    "-crop", f"{crop_percent}%x100%+0+0",
+                    "+repage",
+                    "png:-",
+                ],
+                input=screenshot_data,
+                capture_output=True,
+                check=False,
+            )
+            if crop_result.returncode == 0:
+                screenshot_data = crop_result.stdout
+
+        # Apply center crop (for focusing on gauge within preview pane)
+        if crop_center is not None and crop_center < 1.0:
+            crop_percent = int(crop_center * 100)
+            crop_result = subprocess.run(
+                [
+                    "convert", "png:-",
+                    "-gravity", "center",
+                    "-crop", f"{crop_percent}%x{crop_percent}%+0+0",
+                    "+repage",
+                    "png:-",
+                ],
+                input=screenshot_data,
+                capture_output=True,
+                check=False,
+            )
+            if crop_result.returncode == 0:
+                screenshot_data = crop_result.stdout
+
+        # Apply scaling if requested
+        if scale < 1.0:
+            scale_percent = int(scale * 100)
+            resize_result = subprocess.run(
+                ["convert", "png:-", "-resize", f"{scale_percent}%", "png:-"],
+                input=screenshot_data,
+                capture_output=True,
+                check=False,
+            )
+            if resize_result.returncode == 0:
+                return resize_result.stdout
+
+        return screenshot_data
 
     # Fallback to scrot
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
@@ -147,21 +210,16 @@ def register_screenshot_tools(mcp: FastMCP) -> None:
             "count": len(filtered),
         }
 
-    @mcp.tool()
-    def screenshot_capture(window: str) -> dict[str, Any] | bytes:
-        """Capture a PNG screenshot of a window.
-
-        Args:
-            window: Window name to capture (case-insensitive substring match).
-                    Examples: 'explorer', 'cluster', 'DevDash Gauges Explorer'
-
-        Returns:
-            PNG image data or error message
-        """
+    def _internal_capture(
+        window: str,
+        scale: float,
+        crop_left: float | None = None,
+        crop_center: float | None = None,
+    ) -> dict[str, Any]:
+        """Internal capture function - not exposed as MCP tool."""
         window_id = _find_window_by_name(window)
 
         if not window_id:
-            # List available windows for helpful error
             windows = _list_x11_windows()
             filtered = [
                 w["title"]
@@ -173,7 +231,12 @@ def register_screenshot_tools(mcp: FastMCP) -> None:
                 "available_windows": filtered,
             }
 
-        screenshot_data = _capture_window(window_id)
+        screenshot_data = _capture_window(
+            window_id,
+            scale=scale,
+            crop_left=crop_left,
+            crop_center=crop_center,
+        )
 
         if not screenshot_data:
             return {
@@ -181,9 +244,80 @@ def register_screenshot_tools(mcp: FastMCP) -> None:
                 "Make sure 'import' (ImageMagick) or 'scrot' is installed.",
             }
 
-        # Return base64-encoded image for MCP
         return {
-            "image": base64.b64encode(screenshot_data).decode("utf-8"),
-            "mime_type": "image/png",
-            "window_id": window_id,
+            "result": {
+                "image": base64.b64encode(screenshot_data).decode("utf-8"),
+                "mime_type": "image/png",
+                "window_id": window_id,
+            }
         }
+
+    @mcp.tool()
+    def screenshot_capture(
+        window: str,
+        scale: float = 0.5,
+        crop_center: float | None = None,
+    ) -> dict[str, Any]:
+        """Capture a PNG screenshot of a window.
+
+        Args:
+            window: Window name to capture (case-insensitive substring match).
+                    Examples: 'explorer', 'cluster', 'DevDash Gauges Explorer'
+            scale: Scale factor (0.1-1.0, default 1.0). Lower values reduce image
+                   size and context usage. Recommended: 0.5 for most visual checks.
+            crop_center: Crop to center portion before scaling (0.1-1.0, optional).
+                         E.g., 0.4 keeps only the center 40% of the image.
+                         Useful for focusing on the gauge preview area.
+
+        Returns:
+            PNG image data or error message
+        """
+        # Clamp scale to valid range - minimum 0.3 to prevent context explosion
+        scale = max(0.3, min(1.0, scale))
+
+        # Clamp crop_center if provided
+        if crop_center is not None:
+            crop_center = max(0.1, min(1.0, crop_center))
+
+        result = _internal_capture(
+            window=window,
+            scale=scale,
+            crop_center=crop_center,
+        )
+        if "error" in result:
+            return result
+        return result["result"]
+
+    @mcp.tool()
+    def screenshot_gauge_preview(
+        window: str = "explorer",
+    ) -> dict[str, Any]:
+        """Capture a compact screenshot focused on the gauge preview area.
+
+        IMPORTANT: This is the primary screenshot tool for verifying gauge visuals.
+        It crops to the LEFT 60% (preview pane) then focuses on the center where
+        the gauge is rendered.
+
+        The explorer layout is:
+        - Left 60%: Preview area with gauge centered
+        - Right 40%: Property panel (excluded from capture)
+
+        Uses ~5k tokens instead of ~25k for full screenshots.
+
+        Args:
+            window: Window name to capture (default: 'explorer').
+                    Case-insensitive substring match.
+
+        Returns:
+            PNG image data focused on gauge preview area, or error message
+        """
+        # Crop to left 60% (preview pane), then center 80% of that, scale 50%
+        result = _internal_capture(
+            window=window,
+            scale=0.5,
+            crop_left=0.6,
+            crop_center=0.8,
+        )
+        if "error" in result:
+            return result
+        return result["result"]

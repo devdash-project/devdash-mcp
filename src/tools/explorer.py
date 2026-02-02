@@ -60,6 +60,8 @@ EXPLORER_PAGES = [
     "GaugeFace",
     "GaugeTick",
     "GaugeTickLabel",
+    "Bezel3D",
+    "CenterCap3D",
     "DigitalReadout",
     "GaugeNeedle",
     "GaugeTickRing",
@@ -67,11 +69,54 @@ EXPLORER_PAGES = [
     "GaugeZoneArc",
     "RollingDigitReadout",
     "RadialGauge",
+    "RadialGauge3D",
 ]
 
 
 def register_explorer_tools(mcp: FastMCP) -> None:
     """Register QML Gauges Explorer tools with the MCP server."""
+
+    @mcp.tool()
+    def qml_explorer_status() -> dict[str, Any]:
+        """Check if the QML Gauges Explorer is running (qml-gauges repo).
+
+        Returns the running status, process IDs if running, and whether
+        the WebSocket server is responding.
+
+        Returns:
+            Status dict with 'running', 'pids', and 'websocket_connected' fields
+        """
+        result: dict[str, Any] = {
+            "running": False,
+            "pids": [],
+            "websocket_connected": False,
+        }
+
+        # Check for running processes
+        try:
+            pgrep_result = subprocess.run(
+                ["pgrep", "-f", "qml-gauges-explorer"],
+                capture_output=True,
+                text=True,
+            )
+            if pgrep_result.returncode == 0:
+                result["running"] = True
+                result["pids"] = [p for p in pgrep_result.stdout.strip().split("\n") if p]
+        except Exception:
+            pass
+
+        # Check WebSocket connectivity
+        if WEBSOCKETS_AVAILABLE:
+            config = get_config()
+            try:
+                with ws_connect(config.explorer_ws_url, open_timeout=1.0, close_timeout=1.0) as ws:
+                    ws.send(json.dumps({"action": "getState"}))
+                    ws.recv(timeout=1.0)
+                    result["websocket_connected"] = True
+            except Exception:
+                pass
+
+        return result
 
     @mcp.tool()
     def qml_explorer_get_state() -> dict[str, Any]:
@@ -93,7 +138,7 @@ def register_explorer_tools(mcp: FastMCP) -> None:
             page: Component page name. Valid pages: Welcome, GaugeArc, GaugeBezel,
                   GaugeCenterCap, GaugeFace, GaugeTick, GaugeTickLabel, DigitalReadout,
                   GaugeNeedle, GaugeTickRing, GaugeValueArc, GaugeZoneArc,
-                  RollingDigitReadout, RadialGauge
+                  RollingDigitReadout, RadialGauge, RadialGauge3D, Bezel3D, CenterCap3D
 
         Returns:
             Navigation result with success status
