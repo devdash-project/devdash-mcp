@@ -18,8 +18,9 @@ patterns that catch the common verification mistakes.
 | "This page binds properties to animations and is contaminating my pairwise comparison." | `qml_explorer_freeze_all_properties` | Reads each property's current resolved value and re-sets it as a plain value, breaking the binding. Call before pairwise property-comparison work. |
 | "I only want to freeze one specific property." | `qml_explorer_freeze_property` | Same as above but for a single property name. Returns `{success, frozen_value, was_bound}`. |
 | "What did the explorer print to stdout/stderr?" | `qml_explorer_logs_get` | Returns the tail of the explorer's captured log file. **Requires the explorer to have been launched by this MCP session**, otherwise returns an explicit error. Relaunch via `qml_explorer_kill` + `qml_explorer_launch` if you started the explorer manually. |
-| "Capture the explorer's gauge preview." | `screenshot_gauge_preview` | Returns `{path, width, height, ...}` by default. Pass `inline_thumbnail=True` only when surfacing pixels to a human. |
-| "Capture any window, on either X11 or Wayland." | `screenshot_capture` | Session type is auto-detected from `XDG_SESSION_TYPE`. Hyprland uses `hyprctl` + `grim`; X11 uses `wmctrl` + ImageMagick. |
+| "Capture the explorer's gauge preview." | `screenshot_gauge_preview` | Returns `{path, width, height, focused, ...}` by default. Pass `inline_thumbnail=True` only when surfacing pixels to a human. Focuses the target window before capturing (then restores focus) so the image matches the user's view — see point 7 below. |
+| "Capture any window, on either X11 or Wayland." | `screenshot_capture` | Session type is auto-detected from `XDG_SESSION_TYPE`. Hyprland uses `hyprctl` + `grim`; X11 uses `wmctrl` + ImageMagick. Focuses the target first; result has `focused: bool` (+ `focus_warning` when it couldn't). |
+| "Set a property — and have the value land as the right type." | `qml_explorer_set_property` | Coerces string args to the property's declared type: `"true"`/`"false"` (case-insensitive) → real booleans, numeric strings → numbers. A string that can't represent the type (`"yes"` for a bool, `NaN`, `"1.5"` for an int) is rejected — nothing is sent. Prefer passing JSON `true`/`false`/numbers directly. When a string was coerced the response includes `coerced_value`/`original_value`. Still read back with `get_property` (point 3) — coercion fixes typing, not range clamping. |
 | "What's the current state of the explorer?" | `qml_explorer_get_state` | Returns page name, property values (user-set overrides), and property metadata. |
 | "What's running and on what fd?" | `qml_explorer_status` | Process IDs + WebSocket reachability. |
 
@@ -30,8 +31,8 @@ Patterns that catch common mistakes:
 ### 1. Default to path-only screenshots
 
 Screenshots are saved to `/tmp/devdash-mcp-screenshots/` and the response
-returns `{path, width, height, window_id}`. Pass the path to image tools
-for analysis. Only opt into pixel data (`inline_thumbnail=True`) when
+returns `{path, width, height, window_id, focused}`. Pass the path to image
+tools for analysis. Only opt into pixel data (`inline_thumbnail=True`) when
 surfacing a preview to a human reader — base64 PNGs in tool output cost
 roughly 25k tokens per call.
 
@@ -102,3 +103,25 @@ will change.
 an 800×1000 canvas is below the resolving threshold, and all five
 GaugeTick.tickShape variants currently produce the same 64-bit hash.
 Use `image_structural_diff` instead for primitive-level work.
+
+### 7. Screenshots match the user's view (focus-before-capture)
+
+`screenshot_capture` / `screenshot_gauge_preview` focus the target window
+before grabbing pixels and restore the previously-focused window afterwards.
+This exists because compositors style *unfocused* windows differently — on
+Hyprland, `inactive_opacity` plus blur with `xray = true` makes the window
+translucent and bleeds the wallpaper through, and a window on an inactive
+workspace isn't composited at all. Without the focus step, agent screenshots
+systematically disagreed with what the user sees in direct view (brighter,
+more colourful, washed out).
+
+Implications:
+
+- Captures briefly flip the active window/workspace. Harmless for a dev tool,
+  but don't be surprised by the flicker.
+- Check `focused` in the result. If it's `false` (with a `focus_warning`),
+  the image may still carry compositor artifacts — install the focus helpers
+  (`hyprctl` on Wayland; `wmctrl`/`xdotool` on X11) and retry.
+- When comparing a fresh capture against an older reference image, make sure
+  the reference was also taken focused — a pre-fix reference will show a large
+  spurious diff against a post-fix capture.

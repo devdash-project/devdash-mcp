@@ -133,8 +133,26 @@ Configuration can be set in `.env` or as environment variables:
 | Tool | Description |
 |------|-------------|
 | `screenshot_list_windows` | List available windows (filtered by DevDash keywords) |
-| `screenshot_capture` | Capture window as PNG |
-| `screenshot_gauge_preview` | Compact crop centered on the gauge preview pane |
+| `screenshot_capture` | Capture window as PNG (focuses the target window first so the image matches the user's view, then restores focus) |
+| `screenshot_gauge_preview` | Compact crop centered on the gauge preview pane (also focuses the target window first) |
+
+The capture tools focus the target window before grabbing pixels because
+compositors apply effects to *unfocused* windows — e.g. Hyprland's
+`inactive_opacity` + blur `xray` makes a window translucent and bleeds the
+wallpaper through, so a capture of an unfocused window looks different from
+what the user sees in direct view. Focus is restored to the previously-focused
+window afterwards (this can briefly flip the active window/workspace). The
+result includes a `focused` boolean; when it's `false` the image may still be
+distorted and a `focus_warning` explains why.
+
+`qml_explorer_set_property` coerces string arguments to the target property's
+declared type — `"true"` / `"false"` (case-insensitive) become real booleans
+and numeric strings become numbers — so a bare `"false"` no longer reads as
+truthy on the QML side and sets a bool property to *true*. A string that can't
+represent the declared type (`"yes"` for a bool, `NaN` for a number, `"1.5"`
+for an int) is rejected with an error instead of being silently miscoerced.
+Prefer passing JSON values of the natural type (`true`/`false`, numbers); the
+string forms are a convenience.
 
 ## Usage Examples
 
@@ -171,12 +189,26 @@ devdash-mcp/
 │   └── tools/
 │       ├── __init__.py
 │       ├── explorer.py     # qml-gauges: QML Gauges Explorer (WebSocket)
-│       ├── screenshot.py   # System: X11 window capture
+│       ├── screenshot.py   # System: window capture (X11 + Wayland/Hyprland)
+│       ├── image.py        # System: image diff/analysis helpers
 │       ├── telemetry.py    # devdash: Runtime telemetry (HTTP)
 │       └── logs.py         # devdash: Application logs (HTTP)
+├── tests/                  # stdlib unittest suite
 ├── pyproject.toml
 └── README.md
 ```
+
+### Tests
+
+A small `unittest` suite (stdlib, no extra dependencies) covers the
+property-value coercion rules and the screenshot focus/restore sequencing:
+
+```bash
+python -m unittest discover -s tests
+```
+
+(The bulk of the screenshot and WebSocket paths still need a running explorer
+and a live compositor, so they're exercised manually rather than in the suite.)
 
 ### Adding New Tools
 
@@ -211,5 +243,12 @@ def register_my_tools(mcp: FastMCP) -> None:
 - Window matching is case-insensitive substring search
 
 **"Failed to capture screenshot"**
-- Install `imagemagick` or `scrot`
-- Ensure window is not minimized
+- Wayland (Hyprland): install `grim` (and `hyprctl`, which ships with Hyprland)
+- X11: install `imagemagick` or `scrot`
+- Ensure the window is not minimized
+
+**Screenshot looks washed-out / translucent / shows the wallpaper**
+- This is a compositor effect on *unfocused* windows. The capture tools focus
+  the target window first to avoid it; if `focused` is `false` in the result
+  (with a `focus_warning`), install the focus helpers: `hyprctl` on Wayland,
+  `wmctrl` (and optionally `xdotool` for focus restore) on X11.
