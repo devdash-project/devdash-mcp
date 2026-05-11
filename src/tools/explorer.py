@@ -679,6 +679,13 @@ def register_explorer_tools(mcp: FastMCP) -> None:
         existing_lib_path = env.get("LD_LIBRARY_PATH", "")
         env["LD_LIBRARY_PATH"] = f"{config.explorer_lib_path}:{existing_lib_path}"
 
+        # Force Qt's message handler (qDebug / qInfo / qWarning, plus any QML
+        # console.log) onto stderr. When stderr is redirected to a file rather
+        # than a tty — which it is here, we capture it for qml_explorer_logs_get
+        # — Qt's default handler otherwise routes to the systemd journal, so the
+        # captured log file stays empty. QT_FORCE_STDERR_LOGGING overrides that.
+        env["QT_FORCE_STDERR_LOGGING"] = "1"
+
         try:
             log_dir = Path(tempfile.gettempdir()) / "devdash-mcp-explorer-logs"
             log_dir.mkdir(parents=True, exist_ok=True)

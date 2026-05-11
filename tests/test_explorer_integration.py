@@ -191,5 +191,42 @@ class DiscoverPagesTests(unittest.TestCase):
         self.assertEqual(names, explorer._FALLBACK_EXPLORER_PAGES)
 
 
+class LaunchEnvTests(unittest.TestCase):
+    """qml_explorer_launch forces Qt's log output to the captured stderr."""
+
+    def test_launch_sets_qt_force_stderr_logging(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_home:
+            cfg = Config(qml_gauges_path="/nonexistent/qml-gauges")
+            fake_proc = mock.Mock()
+            fake_proc.poll.return_value = None
+            fake_proc.pid = 99999
+
+            not_running = subprocess_result(returncode=1, stdout="")
+            with mock.patch.object(explorer, "get_config", return_value=cfg), \
+                 mock.patch.object(explorer.subprocess, "run", return_value=not_running), \
+                 mock.patch.object(explorer.os.path, "exists", return_value=True), \
+                 mock.patch.object(explorer.tempfile, "gettempdir", return_value=tmp_home), \
+                 mock.patch.object(explorer.subprocess, "Popen", return_value=fake_proc) as popen, \
+                 mock.patch("time.sleep"), \
+                 mock.patch.dict(explorer._LAUNCHED_LOG_PATHS, {}, clear=True):
+                tools = _explorer_tools()
+                resp = tools["qml_explorer_launch"]()
+
+        self.assertTrue(resp["success"])
+        env = popen.call_args.kwargs["env"]
+        self.assertEqual(env.get("QT_FORCE_STDERR_LOGGING"), "1")
+        # The captured stream is the explorer's stdout, with stderr folded in.
+        self.assertIs(popen.call_args.kwargs["stderr"], explorer.subprocess.STDOUT)
+
+
+def subprocess_result(*, returncode: int, stdout: str):
+    """A minimal stand-in for subprocess.CompletedProcess (only fields we read)."""
+    import subprocess as _sp
+
+    return _sp.CompletedProcess(args=["pgrep"], returncode=returncode, stdout=stdout, stderr="")
+
+
 if __name__ == "__main__":
     unittest.main()

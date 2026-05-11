@@ -8,6 +8,17 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ### Fixed
 
+- **`qml_explorer_logs_get` was always empty — the explorer's output went to
+  the journal, not the captured file.** `qml_explorer_launch` redirects the
+  explorer's stdout/stderr to a per-PID log file, but Qt's default message
+  handler only writes to stderr when stderr is a *tty*; redirected to a file,
+  it routes `qDebug`/`qInfo`/`qWarning` (and QML `console.log`) to the systemd
+  journal instead, leaving the captured file 0 bytes. Launch now sets
+  `QT_FORCE_STDERR_LOGGING=1` in the explorer's environment so all of it lands
+  in the captured stream. (The explorer itself only logs a couple of `qInfo`
+  lines today — a fuller logging story is a qml-gauges-side follow-up — but any
+  `console.log` an explorer page emits is now captured.)
+
 - **Screenshot capture re-reads the window's geometry after focusing.**
   `screenshot_capture` / `screenshot_gauge_preview` measured the target
   window's position+size up front and then captured *after* focusing it — but
