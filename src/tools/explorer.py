@@ -152,15 +152,60 @@ def register_explorer_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def qml_explorer_get_property(name: str) -> dict[str, Any]:
-        """Get the current value of a specific property in the QML Gauges Explorer (qml-gauges repo).
+        """Get the current resolved value of a property, including when bound.
+
+        Falls back to the page state if the explorer's getProperty handler
+        reports "not found" — this happens for properties bound to animations
+        or computed expressions, which the explorer's getProperty API can't
+        introspect but which still appear (already resolved) in getState.
 
         Args:
             name: Property name (e.g., 'tickShape', 'color', 'hasGlow')
 
         Returns:
-            Property value and metadata
+            On success:
+                {
+                  "success": True,
+                  "value": <current resolved value>,
+                  "is_bound": True | False,
+                  "binding_source": str | None,
+                }
+            On failure:
+                {"success": False, "error": <reason>}
+
+        BREAKING CHANGE (devdash-mcp 0.3.0): previous releases returned the raw
+        response from the explorer's WebSocket protocol, which had a different
+        shape and could not resolve bound properties. See CHANGELOG.md.
         """
-        return _send_request({"action": "getProperty", "name": name})
+        primary = _send_request({"action": "getProperty", "name": name})
+
+        if primary.get("success") and "data" in primary:
+            data = primary["data"]
+            return {
+                "success": True,
+                "value": data.get("value"),
+                "is_bound": False,
+                "binding_source": None,
+            }
+
+        # Fallback: scan the page state for a resolved value (handles
+        # properties bound to animations / expressions).
+        state = _send_request({"action": "getState"})
+        if state.get("success") and "data" in state:
+            props = state["data"].get("properties") or {}
+            if name in props:
+                return {
+                    "success": True,
+                    "value": props[name],
+                    "is_bound": True,
+                    "binding_source": None,
+                }
+
+        return {
+            "success": False,
+            "error": primary.get("error")
+            or f"Property '{name}' not found on current page",
+        }
 
     @mcp.tool()
     def qml_explorer_set_property(name: str, value: Any) -> dict[str, Any]:
