@@ -207,6 +207,113 @@ def register_explorer_tools(mcp: FastMCP) -> None:
             or f"Property '{name}' not found on current page",
         }
 
+    def _resolve_current_value(name: str) -> tuple[bool, Any, bool]:
+        """Return (found, value, was_bound). Mirrors qml_explorer_get_property logic."""
+        primary = _send_request({"action": "getProperty", "name": name})
+        if primary.get("success") and "data" in primary:
+            return True, primary["data"].get("value"), False
+        state = _send_request({"action": "getState"})
+        if state.get("success") and "data" in state:
+            props = state["data"].get("properties") or {}
+            if name in props:
+                return True, props[name], True
+        return False, None, False
+
+    @mcp.tool()
+    def qml_explorer_freeze_property(property_name: str) -> dict[str, Any]:
+        """Capture a property's current resolved value and re-set it as a plain value.
+
+        Useful for verification workflows where a page binds properties to an
+        animation (e.g. GaugeTick.angle). Reading the resolved value and
+        writing it back breaks the binding, pinning the property until
+        explicitly changed.
+
+        Args:
+            property_name: Property to freeze.
+
+        Returns:
+            {
+              "success": True,
+              "property": <name>,
+              "frozen_value": <value that was reapplied>,
+              "was_bound": True | False,    # True if value came from page state
+                                            # rather than the direct getProperty path
+            }
+            or {"success": False, "error": ...} if the property couldn't be
+            resolved (typically a never-set, animation-bound property whose
+            current value the explorer doesn't expose).
+        """
+        found, value, was_bound = _resolve_current_value(property_name)
+        if not found:
+            return {
+                "success": False,
+                "error": (
+                    f"Property '{property_name}' is not resolvable from the MCP layer. "
+                    "If it's bound to an animation and has never been set, set it once "
+                    "to any in-range value first to bring it into the page state."
+                ),
+            }
+        write = _send_request(
+            {"action": "setProperty", "name": property_name, "value": value}
+        )
+        if not write.get("event") and not write.get("success", False):
+            return {
+                "success": False,
+                "error": write.get("error", "setProperty failed"),
+            }
+        return {
+            "success": True,
+            "property": property_name,
+            "frozen_value": value,
+            "was_bound": was_bound,
+        }
+
+    @mcp.tool()
+    def qml_explorer_freeze_all_properties() -> dict[str, Any]:
+        """Freeze every resolvable property on the current page.
+
+        Iterates the current page's propertyMetadata, resolves each property's
+        current value, and re-sets it to break any active binding. Returns the
+        frozen value for every property that could be resolved, and a list of
+        names that could not.
+
+        Returns:
+            {
+              "success": True,
+              "page": <page name>,
+              "frozen": {<property_name>: <frozen_value>, ...},
+              "skipped": [<property_name>, ...],   # not resolvable from MCP
+            }
+        """
+        state = _send_request({"action": "getState"})
+        if not (state.get("success") and "data" in state):
+            return {
+                "success": False,
+                "error": state.get("error", "getState failed"),
+            }
+
+        data = state["data"]
+        metadata = data.get("propertyMetadata") or []
+        frozen: dict[str, Any] = {}
+        skipped: list[str] = []
+        for entry in metadata:
+            name = entry.get("name")
+            if not name:
+                continue
+            found, value, _was_bound = _resolve_current_value(name)
+            if not found:
+                skipped.append(name)
+                continue
+            _send_request({"action": "setProperty", "name": name, "value": value})
+            frozen[name] = value
+
+        return {
+            "success": True,
+            "page": data.get("page"),
+            "frozen": frozen,
+            "skipped": skipped,
+        }
+
     @mcp.tool()
     def qml_explorer_set_property(name: str, value: Any) -> dict[str, Any]:
         """Set a property value on the current component in the QML Gauges Explorer (qml-gauges repo).
