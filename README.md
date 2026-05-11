@@ -43,11 +43,25 @@ pip install .
 
 ## System Requirements
 
-For screenshot capture via X11:
+Screenshot capture auto-detects the session type from `XDG_SESSION_TYPE`
+at server startup. Install the binaries for whichever you use.
+
+For X11 sessions:
 ```bash
 # Ubuntu/Debian
 sudo apt install wmctrl imagemagick scrot
+# Arch / EndeavourOS
+sudo pacman -S wmctrl imagemagick scrot
 ```
+
+For Wayland sessions (Hyprland):
+```bash
+# Arch / EndeavourOS
+sudo pacman -S grim hyprland   # hyprctl ships with hyprland
+```
+
+`Pillow` is installed automatically as a Python dependency and handles
+crop/scale post-processing on both paths.
 
 ## Configuration
 
@@ -114,12 +128,13 @@ Configuration can be set in `.env` or as environment variables:
 | `devdash_telemetry_screenshot` | Capture screenshot via DevTools API |
 | `devdash_logs_get` | Retrieve logs with filtering (level, category, count) |
 
-### System (X11 window capture - works with any window)
+### System (window capture — X11 or Wayland/Hyprland, auto-detected)
 
 | Tool | Description |
 |------|-------------|
-| `screenshot_list_windows` | List available windows |
+| `screenshot_list_windows` | List available windows (filtered by DevDash keywords) |
 | `screenshot_capture` | Capture window as PNG |
+| `screenshot_gauge_preview` | Compact crop centered on the gauge preview pane |
 
 ## Usage Examples
 
