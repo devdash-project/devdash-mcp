@@ -62,6 +62,7 @@ def _send_request(request: dict[str, Any], timeout: float = 5.0) -> dict[str, An
 # Valid component pages in the explorer
 EXPLORER_PAGES = [
     "Welcome",
+    "BezelScrews",
     "GaugeArc",
     "GaugeBezel",
     "GaugeCenterCap",
@@ -144,10 +145,11 @@ def register_explorer_tools(mcp: FastMCP) -> None:
         """Navigate the QML Gauges Explorer to a specific component page (qml-gauges repo).
 
         Args:
-            page: Component page name. Valid pages: Welcome, GaugeArc, GaugeBezel,
-                  GaugeCenterCap, GaugeFace, GaugeTick, GaugeTickLabel, DigitalReadout,
-                  GaugeNeedle, GaugeTickRing, GaugeValueArc, GaugeZoneArc,
-                  RollingDigitReadout, RadialGauge, RadialGauge3D, Bezel3D, CenterCap3D
+            page: Component page name. Valid pages: Welcome, BezelScrews, GaugeArc,
+                  GaugeBezel, GaugeCenterCap, GaugeFace, GaugeTick, GaugeTickLabel,
+                  DigitalReadout, GaugeNeedle, GaugeTickRing, GaugeValueArc,
+                  GaugeZoneArc, RollingDigitReadout, RadialGauge, RadialGauge3D,
+                  IndustrialGauge, Bezel3D, CenterCap3D
 
         Returns:
             Navigation result with success status
