@@ -163,8 +163,16 @@ def _property_type_from_metadata(name: str) -> str | None:
     return None
 
 
-# Valid component pages in the explorer
-EXPLORER_PAGES = [
+# --- Explorer page discovery -------------------------------------------------
+#
+# The explorer's component pages are one ``<Name>Page.qml`` file each under
+# explorer/qml/pages/ (so ``BezelScrewsPage.qml`` is page "BezelScrews"). The
+# authoritative list is therefore discovered from that directory at call time —
+# adding a page no longer requires restarting the MCP server. The constant
+# below is only a last-resort fallback for when the explorer source tree can't
+# be located (``DEVDASH_QML_GAUGES_PATH`` unset / not a checkout, e.g. when the
+# MCP server is talking to a remote explorer).
+_FALLBACK_EXPLORER_PAGES = [
     "Welcome",
     "BezelScrews",
     "GaugeArc",
@@ -185,6 +193,31 @@ EXPLORER_PAGES = [
     "RadialGauge3D",
     "IndustrialGauge",
 ]
+
+
+def _discover_explorer_pages() -> tuple[list[str], bool]:
+    """Return ``(page_names, discovered)``.
+
+    Scans ``<qml_gauges_path>/explorer/qml/pages/*Page.qml`` and strips the
+    ``Page`` suffix from each stem. ``discovered`` is ``True`` when that
+    directory was readable and produced at least one page; otherwise the
+    hardcoded :data:`_FALLBACK_EXPLORER_PAGES` is returned with
+    ``discovered=False``.
+    """
+    base = get_config().qml_gauges_path
+    if base:
+        pages_dir = Path(base) / "explorer" / "qml" / "pages"
+        try:
+            names = sorted(
+                stem[:-4]
+                for stem in (p.stem for p in pages_dir.glob("*Page.qml"))
+                if stem.endswith("Page") and stem[:-4]
+            )
+        except OSError:
+            names = []
+        if names:
+            return names, True
+    return list(_FALLBACK_EXPLORER_PAGES), False
 
 
 def register_explorer_tools(mcp: FastMCP) -> None:
@@ -246,24 +279,61 @@ def register_explorer_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def qml_explorer_navigate(page: str) -> dict[str, Any]:
-        """Navigate the QML Gauges Explorer to a specific component page (qml-gauges repo).
+        """Navigate the QML Gauges Explorer to a component page (qml-gauges repo).
+
+        Valid page names are discovered at call time from the explorer's
+        ``explorer/qml/pages/*Page.qml`` files (page "Foo" ↔ ``FooPage.qml``),
+        so a newly added page works without restarting the MCP server. An
+        unrecognised name is rejected, with the current list included in the
+        error. After the navigate request, the new page is confirmed via
+        ``getState``; if the explorer didn't actually switch — e.g. the page
+        file exists but isn't wired into ``Main.qml``'s ``pageIndexMap`` — an
+        error is returned rather than a false success.
 
         Args:
-            page: Component page name. Valid pages: Welcome, BezelScrews, GaugeArc,
-                  GaugeBezel, GaugeCenterCap, GaugeFace, GaugeTick, GaugeTickLabel,
-                  DigitalReadout, GaugeNeedle, GaugeTickRing, GaugeValueArc,
-                  GaugeZoneArc, RollingDigitReadout, RadialGauge, RadialGauge3D,
-                  IndustrialGauge, Bezel3D, CenterCap3D
+            page: Component page name (e.g. 'RadialGauge', 'BezelScrews').
 
         Returns:
-            Navigation result with success status
+            On success: ``{"success": True, "page": <page>, "pages": [...]}``.
+            On failure: ``{"success": False, "error": <reason>, "pages": [...]}``
+            (and ``"current_page"`` when the explorer stayed on a different page).
         """
-        if page not in EXPLORER_PAGES:
+        pages, discovered = _discover_explorer_pages()
+        if page not in pages:
+            qualifier = (
+                "Available" if discovered
+                else "Known (fallback list — explorer source tree not found)"
+            )
             return {
                 "success": False,
-                "error": f"Invalid page '{page}'. Valid pages: {', '.join(EXPLORER_PAGES)}",
+                "error": f"Unknown page '{page}'. {qualifier} pages: {', '.join(pages)}",
+                "pages": pages,
             }
-        return _send_request({"action": "navigate", "page": page})
+
+        nav = _send_request({"action": "navigate", "page": page})
+        # The immediate reply may be the navigate ack OR the broadcast
+        # "pageChanged" event (the explorer broadcasts synchronously, before it
+        # sends the response) — either is fine. Only an explicit success:false
+        # is a hard failure (bad request, or the WS is unreachable).
+        if isinstance(nav, dict) and nav.get("success") is False:
+            return nav
+
+        state = _send_request({"action": "getState"})
+        current = None
+        if isinstance(state, dict) and state.get("success"):
+            current = (state.get("data") or {}).get("page")
+        if current is not None and current != page:
+            return {
+                "success": False,
+                "error": (
+                    f"Navigation request was accepted but the explorer is still "
+                    f"on '{current}' — '{page}' may not be registered in the "
+                    f"explorer's Main.qml pageIndexMap."
+                ),
+                "pages": pages,
+                "current_page": current,
+            }
+        return {"success": True, "page": page, "pages": pages}
 
     @mcp.tool()
     def qml_explorer_get_property(name: str) -> dict[str, Any]:
