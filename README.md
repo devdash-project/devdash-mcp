@@ -115,9 +115,12 @@ Configuration can be set in `.env` or as environment variables:
 | `qml_explorer_status` | Whether an explorer is running, and whether *this* session launched it (`managed_by_session`) |
 | `qml_explorer_get_state` | Get current page and property values |
 | `qml_explorer_navigate` | Navigate to a component page (valid pages discovered from the explorer source at call time; confirms the page actually switched) |
-| `qml_explorer_get_property` | Get a single property value |
+| `qml_explorer_get_property` | Get a single property value (resolves bound properties too) |
 | `qml_explorer_set_property` | Set a property value (string args are coerced to the property's declared type) |
+| `qml_explorer_reset_property` | Re-establish a property's binding after `set_property`/`freeze` pinned it (needs explorer support — see below) |
+| `qml_explorer_freeze_property` / `qml_explorer_freeze_all_properties` | Pin a property (or all) to its current value, breaking animation/expression bindings for verification |
 | `qml_explorer_list_properties` | List available properties with metadata |
+| `qml_explorer_logs_get` | Tail the explorer's stdout/stderr (only when this session launched it) |
 
 ### devdash repo (DevDash runtime via HTTP API)
 
@@ -154,6 +157,14 @@ represent the declared type (`"yes"` for a bool, `NaN` for a number, `"1.5"`
 for an int) is rejected with an error instead of being silently miscoerced.
 Prefer passing JSON values of the natural type (`true`/`false`, numbers); the
 string forms are a convenience.
+
+`qml_explorer_reset_property` undoes the binding break that
+`qml_explorer_set_property` (and the `freeze_*` tools) cause when they assign a
+property a literal — it asks the explorer to re-evaluate the original binding so
+the property tracks it again. It needs the explorer to implement a
+`resetProperty` WebSocket action; builds without it (all current ones) get back
+`explorer_support: false` and a pointer to the qml-gauges-side change, and the
+tool starts working the moment that change ships — no MCP update needed.
 
 `qml_explorer_status` verifies liveness actively on every call (`pgrep` for the
 explorer binary plus a real WebSocket round-trip), so an instance left running

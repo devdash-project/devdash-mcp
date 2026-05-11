@@ -86,6 +86,13 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ### Added
 
+- `qml_explorer_reset_property` — restores a property's QML binding after
+  `qml_explorer_set_property` / `qml_explorer_freeze_property` pinned it to a
+  literal (the clean "unfreeze" that previously meant restarting the explorer).
+  Sends a `resetProperty` WebSocket action; current explorer builds don't
+  implement it, so the tool returns `explorer_support: false` with a pointer to
+  the qml-gauges-side change needed, and works unchanged once that lands.
+
 - `screenshot_capture` / `screenshot_gauge_preview` accept an optional
   ``roi`` ({x, y, width, height}) for post-pipeline cropping, plus
   ``inline_thumbnail`` and ``thumbnail_max_dim`` for opt-in base64 previews.

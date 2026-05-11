@@ -3,7 +3,7 @@
 Lets the explorer MCP tools be exercised end-to-end (real `_send_request`,
 real JSON over a real socket) without a running explorer. Implements the
 subset of the protocol the tools use: ``ping``, ``getState``, ``getProperty``,
-``setProperty``, ``listProperties``, ``navigate``.
+``setProperty``, ``listProperties``, ``navigate``, ``resetProperty``.
 
 Differences from the real server, on purpose:
 
@@ -18,6 +18,9 @@ Differences from the real server, on purpose:
   simulate a page that exists as a file but isn't wired into ``Main.qml``.
 * ``pages=[...]`` makes ``getState``'s ``data`` carry a ``pages`` array (the
   proposed qml-gauges enhancement); leaving it ``None`` mimics current builds.
+* ``supports_reset_property=True`` makes ``resetProperty`` succeed (and drop
+  the pinned override); otherwise it falls through with
+  ``Unknown action: 'resetProperty'`` like a current build.
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ class FakeExplorer:
         property_metadata: list[dict[str, Any]] | None = None,
         navigate_switches: bool = True,
         pages: list[str] | None = None,
+        supports_reset_property: bool = False,
     ) -> None:
         self.page = page
         self.properties: dict[str, Any] = dict(properties or {})
@@ -51,10 +55,12 @@ class FakeExplorer:
         # When not None, getState's data carries a "pages" array (the future
         # qml-gauges-side enhancement); None mimics current explorer builds.
         self.pages = pages
+        self.supports_reset_property = supports_reset_property
 
         # Wire-level audit trails.
         self.received_set: list[tuple[Any, Any]] = []       # (name, value) as received
         self.received_navigate: list[Any] = []              # page as received
+        self.received_reset: list[Any] = []                 # name as received
         self.requests: list[dict[str, Any]] = []            # every parsed request
 
         self._server = None
@@ -103,7 +109,19 @@ class FakeExplorer:
                 self.page = page
             return {"success": True, "data": {"page": page}}
 
-        return {"success": False, "error": f"unknown action {action!r}"}
+        if action == "resetProperty":
+            name = req.get("name")
+            self.received_reset.append(name)
+            if not self.supports_reset_property:
+                # Mimic the real StateServer's fall-through for an action it
+                # doesn't know about.
+                return {"success": False, "error": f"Unknown action: '{action}'"}
+            # Re-binding would re-evaluate the original expression; the fake
+            # just drops the pinned override so a later getProperty "misses".
+            self.properties.pop(name, None)
+            return {"success": True, "data": {"name": name, "rebound": True}}
+
+        return {"success": False, "error": f"Unknown action: '{action}'"}
 
     def _handle(self, ws) -> None:
         for message in ws:

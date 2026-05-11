@@ -242,6 +242,36 @@ class LaunchEnvTests(unittest.TestCase):
         self.assertIs(popen.call_args.kwargs["stderr"], explorer.subprocess.STDOUT)
 
 
+class ResetPropertyTests(_PatchedConfigMixin):
+    def test_unsupported_explorer_is_reported_clearly(self):
+        with fake_explorer(supports_reset_property=False) as fx:
+            self._use_port(fx.port)
+            tools = _explorer_tools()
+            resp = tools["qml_explorer_reset_property"]("needleColor")
+            self.assertFalse(resp["success"])
+            self.assertIs(resp["explorer_support"], False)
+            self.assertIn("resetProperty", resp["error"])
+            self.assertEqual(fx.received_reset, ["needleColor"])  # request was sent
+
+    def test_supported_explorer_rebinds(self):
+        with fake_explorer(properties={"needleColor": "#pinned"}, supports_reset_property=True) as fx:
+            self._use_port(fx.port)
+            tools = _explorer_tools()
+            resp = tools["qml_explorer_reset_property"]("needleColor")
+            self.assertTrue(resp["success"])
+            self.assertEqual(resp["property"], "needleColor")
+            self.assertEqual(fx.received_reset, ["needleColor"])
+            self.assertNotIn("needleColor", fx.properties)  # pinned override dropped
+
+    def test_empty_name_is_rejected_without_contacting_explorer(self):
+        with fake_explorer(supports_reset_property=True) as fx:
+            self._use_port(fx.port)
+            tools = _explorer_tools()
+            resp = tools["qml_explorer_reset_property"]("")
+            self.assertFalse(resp["success"])
+            self.assertEqual(fx.received_reset, [])
+
+
 class StatusManagementTests(unittest.TestCase):
     """qml_explorer_status's session-vs-foreign partitioning of running PIDs."""
 

@@ -567,6 +567,63 @@ def register_explorer_tools(mcp: FastMCP) -> None:
         }
 
     @mcp.tool()
+    def qml_explorer_reset_property(name: str) -> dict[str, Any]:
+        """Restore a property's QML binding after it was pinned to a plain value.
+
+        ``qml_explorer_set_property`` (and ``qml_explorer_freeze_property`` /
+        ``qml_explorer_freeze_all_properties``, which use it) detach whatever
+        binding a property had — a theme-token expression, an animation, a
+        computed expression — by assigning it a literal. This asks the explorer
+        to re-establish that binding, so the property tracks it again. It's the
+        clean "unfreeze" that previously meant restarting the explorer.
+
+        Requires explorer support for the ``resetProperty`` WebSocket action.
+        Builds without it (the explorer's StateServer has no such handler yet —
+        see the qml-gauges-side recommendation) return an explicit error and
+        change nothing; once that handler lands this tool works unchanged.
+
+        Args:
+            name: Property to rebind.
+
+        Returns:
+            On success: ``{"success": True, "property": <name>, ...}`` (plus
+            any ``data`` the explorer returned).
+            On failure: ``{"success": False, "error": <reason>,
+            "explorer_support": bool}`` — ``explorer_support`` is ``False`` when
+            this explorer build doesn't implement the action.
+        """
+        if not name:
+            return {"success": False, "error": "Missing 'name'", "explorer_support": True}
+        resp = _send_request({"action": "resetProperty", "name": name})
+        if not isinstance(resp, dict):
+            return {"success": False, "error": "Malformed response from explorer",
+                    "explorer_support": True}
+        # Success path tolerates the explorer's broadcast-then-respond ordering:
+        # a leading "propertyChanged" event message counts as success too.
+        if resp.get("success") or resp.get("event"):
+            out: dict[str, Any] = {"success": True, "property": name}
+            if "data" in resp:
+                out["data"] = resp["data"]
+            return out
+        err = resp.get("error") or "resetProperty failed"
+        if "nknown action" in err:  # "Unknown action: 'resetProperty'"
+            return {
+                "success": False,
+                "explorer_support": False,
+                "error": (
+                    "This explorer build doesn't implement the 'resetProperty' "
+                    "action. It needs a qml-gauges-side change: add a "
+                    "'resetProperty' branch to StateServer::handleRequest that "
+                    "emits resetPropertyRequested(name), and have the explorer "
+                    "re-establish that editor's binding (e.g. PropertyPanel "
+                    "re-applies the metadata default via Qt.binding, or the "
+                    "page re-runs its initial binding for that property). Until "
+                    "then, restart the explorer to clear pinned properties."
+                ),
+            }
+        return {"success": False, "explorer_support": True, "error": err}
+
+    @mcp.tool()
     def qml_explorer_set_property(name: str, value: Any) -> dict[str, Any]:
         """Set a property value on the current component in the QML Gauges Explorer (qml-gauges repo).
 
