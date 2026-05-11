@@ -113,9 +113,9 @@ Configuration can be set in `.env` or as environment variables:
 | `qml_explorer_launch` | Launch explorer with correct library paths |
 | `qml_explorer_kill` | Kill running explorer processes |
 | `qml_explorer_get_state` | Get current page and property values |
-| `qml_explorer_navigate` | Navigate to a component page |
+| `qml_explorer_navigate` | Navigate to a component page (valid pages discovered from the explorer source at call time; confirms the page actually switched) |
 | `qml_explorer_get_property` | Get a single property value |
-| `qml_explorer_set_property` | Set a property value |
+| `qml_explorer_set_property` | Set a property value (string args are coerced to the property's declared type) |
 | `qml_explorer_list_properties` | List available properties with metadata |
 
 ### devdash repo (DevDash runtime via HTTP API)
@@ -125,7 +125,7 @@ Configuration can be set in `.env` or as environment variables:
 | `devdash_telemetry_get_state` | Get current vehicle telemetry (RPM, temps, etc.) |
 | `devdash_telemetry_get_warnings` | Get active warnings and alerts |
 | `devdash_telemetry_list_windows` | List DevDash windows via DevTools |
-| `devdash_telemetry_screenshot` | Capture screenshot via DevTools API |
+| `devdash_telemetry_screenshot` | Capture screenshot via DevTools API (path-only by default, like `screenshot_capture`; `inline_thumbnail=True` for a base64 preview) |
 | `devdash_logs_get` | Retrieve logs with filtering (level, category, count) |
 
 ### System (window capture — X11 or Wayland/Hyprland, auto-detected)
@@ -153,6 +153,14 @@ represent the declared type (`"yes"` for a bool, `NaN` for a number, `"1.5"`
 for an int) is rejected with an error instead of being silently miscoerced.
 Prefer passing JSON values of the natural type (`true`/`false`, numbers); the
 string forms are a convenience.
+
+`qml_explorer_navigate` validates the page name against the explorer's actual
+`explorer/qml/pages/*Page.qml` files (resolved at call time via
+`DEVDASH_QML_GAUGES_PATH`), so a freshly added page works without restarting
+the MCP server. It also confirms via `getState` that the explorer really
+switched, and reports a failure (rather than a false success) if it didn't —
+e.g. a page file that exists but isn't registered in `Main.qml`'s
+`pageIndexMap`. The success response includes `pages` (the current valid set).
 
 ## Usage Examples
 
@@ -182,6 +190,7 @@ Claude: [uses devdash_telemetry_get_state] Current RPM is 3500...
 
 ```
 devdash-mcp/
+├── .github/workflows/      # CI: runs the unittest suite on push/PR
 ├── src/
 │   ├── __init__.py
 │   ├── server.py           # FastMCP entry point
@@ -193,22 +202,28 @@ devdash-mcp/
 │       ├── image.py        # System: image diff/analysis helpers
 │       ├── telemetry.py    # devdash: Runtime telemetry (HTTP)
 │       └── logs.py         # devdash: Application logs (HTTP)
-├── tests/                  # stdlib unittest suite
+├── tests/                  # stdlib unittest suite (+ _fake_explorer.py fixture)
 ├── pyproject.toml
 └── README.md
 ```
 
 ### Tests
 
-A small `unittest` suite (stdlib, no extra dependencies) covers the
-property-value coercion rules and the screenshot focus/restore sequencing:
+A `unittest` suite (stdlib, no extra dependencies):
 
 ```bash
-python -m unittest discover -s tests
+python -m unittest discover          # from the repo root
 ```
 
-(The bulk of the screenshot and WebSocket paths still need a running explorer
-and a live compositor, so they're exercised manually rather than in the suite.)
+It covers the property-value coercion rules and the screenshot focus/restore
+sequencing as unit tests, plus end-to-end coverage of the explorer tools
+against an in-process fake WebSocket state server (`tests/_fake_explorer.py`)
+and of the screenshot tools with `hyprctl`/`grim` faked. CI runs the same
+suite on push/PR via `.github/workflows/tests.yml`.
+
+(The image-analysis tools and the X11 capture path aren't covered by the
+suite yet — they need real PNGs / a real X11 session — so those are still
+exercised manually.)
 
 ### Adding New Tools
 
