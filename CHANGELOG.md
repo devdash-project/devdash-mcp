@@ -8,6 +8,18 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ### Fixed
 
+- **Screenshot capture re-reads the window's geometry after focusing.**
+  `screenshot_capture` / `screenshot_gauge_preview` measured the target
+  window's position+size up front and then captured *after* focusing it — but
+  focusing a tiled window can move/resize it (a layout reflow, or switching to
+  its workspace), so `grim`'s crop region could be stale and bleed in a
+  neighbouring window or the wallpaper. The geometry is now re-read after the
+  focus settle, just before the capture. (The captured window can still be a
+  *different size on different calls* — a tiling compositor sizes the explorer
+  from its layout, not from the explorer's `width:` — so the tool docstrings
+  now say: derive `roi` coordinates from the `width`/`height` of the previous
+  capture, don't hardcode them.)
+
 - **`qml_explorer_set_property` no longer miscoerces string values.** A string
   argument like `"false"` reached the QML side, where `target[name] = value`
   goes through the JS engine and *any* non-empty string is truthy — so

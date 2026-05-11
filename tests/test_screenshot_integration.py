@@ -45,11 +45,23 @@ def _screenshot_tools() -> dict:
 class FakeDesktop:
     """Stand-in for hyprctl + grim. Records the focus/capture call sequence."""
 
-    def __init__(self, *, clients=None, focus_succeeds=True, grim_succeeds=True, active_address=_TERMINAL_ADDRESS):
+    def __init__(
+        self,
+        *,
+        clients=None,
+        focus_succeeds=True,
+        grim_succeeds=True,
+        active_address=_TERMINAL_ADDRESS,
+        geometry_after_focus=None,
+    ):
         self.clients = clients if clients is not None else [dict(_EXPLORER_WINDOW)]
         self.focus_succeeds = focus_succeeds
         self.grim_succeeds = grim_succeeds
         self.active_address = active_address
+        # Optional {"at": [x, y], "size": [w, h]} applied to the explorer
+        # client after the first focuswindow dispatch — simulates a tiling
+        # reflow / workspace switch that moves the window before capture.
+        self.geometry_after_focus = geometry_after_focus
         self.events: list[tuple] = []  # ("focus", addr) / ("sleep",) / ("capture", geom)
 
     # patched in for screenshot._run_command (hyprctl)
@@ -60,6 +72,12 @@ class FakeDesktop:
             return json.dumps({"address": self.active_address, "title": "active"}), 0
         if cmd[:3] == ["hyprctl", "dispatch", "focuswindow"]:
             self.events.append(("focus", cmd[3].split("address:", 1)[-1]))
+            if self.geometry_after_focus is not None and self.focus_succeeds:
+                for c in self.clients:
+                    if c.get("address") == cmd[3].split("address:", 1)[-1]:
+                        c.update(self.geometry_after_focus)
+                # one-shot: don't keep mutating on a focus-restore dispatch
+                self.geometry_after_focus = None
             return ("", 0 if self.focus_succeeds else 1)
         return ("", 1)
 
@@ -124,6 +142,18 @@ class CaptureFocusSequenceTests(_ScreenshotEnvMixin):
         self._install(desktop)
         _screenshot_tools()["screenshot_capture"]("explorer", scale=1.0)
         self.assertEqual(desktop.events, [("focus", "0xEXPLORER"), ("sleep",), ("capture", "100,100 800x600")])
+
+    def test_recaptures_geometry_after_focus(self):
+        # Focusing moves/resizes the (tiled) window; the crop region must track
+        # the *post-focus* geometry, not the geometry first observed.
+        desktop = FakeDesktop(geometry_after_focus={"at": [200, 50], "size": [1024, 768]})
+        self._install(desktop)
+        result = _screenshot_tools()["screenshot_capture"]("explorer", scale=1.0)
+        self.assertNotIn("error", result)
+        self.assertEqual((result["width"], result["height"]), (1024, 768))
+        self.assertIn(("capture", "200,50 1024x768"), desktop.events)
+        # the stale region must NOT have been captured
+        self.assertNotIn(("capture", "100,100 800x600"), desktop.events)
 
     def test_window_not_found(self):
         desktop = FakeDesktop(clients=[])

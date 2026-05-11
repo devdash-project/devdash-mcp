@@ -234,6 +234,31 @@ def _find_window_unified(name: str) -> dict[str, Any] | None:
     return {"id": win_id, "title": name, "class": "", "x": 0, "y": 0, "width": 0, "height": 0}
 
 
+def _refresh_window_geometry(win: dict[str, Any]) -> dict[str, Any]:
+    """Re-read the live x/y/width/height of ``win`` (matched by id).
+
+    The geometry first observed for a window can be stale by the time we
+    capture: focusing it may have moved it (a tiling reflow, or switching to
+    its workspace), and on a tiling compositor the window's size is whatever
+    the layout assigns — it isn't the explorer's choice, and it changes as the
+    workspace's other windows come and go. ``grim`` needs explicit coordinates,
+    so a stale crop region bleeds in neighbouring windows / the wallpaper. We
+    therefore re-query right before the capture (after the focus settle).
+
+    Returns ``win`` merged with the fresh geometry, or ``win`` unchanged if the
+    window can't be re-located (best effort — better a possibly-stale crop than
+    no capture).
+    """
+    wid = win.get("id")
+    if not wid:
+        return win
+    for w in _list_windows_unified():
+        if w.get("id") == wid:
+            fresh = {k: w[k] for k in ("x", "y", "width", "height") if k in w}
+            return {**win, **fresh}
+    return win
+
+
 def _capture_window_unified(win: dict[str, Any]) -> bytes | None:
     if SESSION_TYPE == "wayland":
         return _capture_hyprland_window(win)
@@ -344,11 +369,16 @@ def _capture_focused(win: dict[str, Any]) -> tuple[bytes | None, bool]:
     capture (the image may be distorted; ``focused_ok`` is ``False``). Prior
     focus is restored afterwards on a best-effort basis, unless the target was
     already the focused window.
+
+    The window's geometry is re-read *after* the focus settle (focusing can
+    move/resize a tiled window) so the crop region matches where the window
+    actually is at capture time, not where it was first seen.
     """
     focused_ok, prior_focus = _focus_target_window(win)
     if focused_ok:
         # Let the compositor finish any focus-in opacity/blur transition.
         time.sleep(_FOCUS_SETTLE_SECONDS)
+    win = _refresh_window_geometry(win)
     data = _capture_window_unified(win)
     if focused_ok and prior_focus and prior_focus != win.get("id", ""):
         _restore_focus(prior_focus)
@@ -554,9 +584,16 @@ def register_screenshot_tools(mcp: FastMCP) -> None:
         active window/workspace as a side effect. ``focused`` in the result
         reports whether this succeeded.
 
-        Composition: focus window -> window capture -> restore focus ->
-        optional left-/center-crop -> optional scale -> optional roi crop ->
-        save to disk -> optional thumbnail.
+        Composition: focus window -> re-read window geometry -> window capture
+        -> restore focus -> optional left-/center-crop -> optional scale ->
+        optional roi crop -> save to disk -> optional thumbnail.
+
+        Note: the captured window can be a *different size on different calls* —
+        a tiling window manager sizes the explorer from its layout, not from
+        the explorer's ``width:``/``height:``, and that layout shifts as other
+        windows come and go (or as this tool's focus dance flips workspaces).
+        Don't hardcode ``roi`` pixel coordinates across captures; derive them
+        from the ``width``/``height`` returned by the *previous* capture.
 
         Args:
             window: Window name (case-insensitive substring match on title or
@@ -621,6 +658,12 @@ def register_screenshot_tools(mcp: FastMCP) -> None:
 
         Pixel data is opt-in. Default response is path + dimensions; pass
         ``inline_thumbnail=True`` to also include a base64 preview.
+
+        Note: the captured window can be a *different size on different calls*
+        (a tiling window manager sizes the explorer from its layout, not from
+        the explorer's ``width:``), so the post-pipeline image size varies too.
+        Don't hardcode ``roi`` pixel coordinates across captures; derive them
+        from the ``width``/``height`` returned by the *previous* capture.
 
         Args:
             window: Window name (default 'explorer'). Substring match on title
