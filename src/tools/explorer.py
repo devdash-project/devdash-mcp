@@ -227,16 +227,35 @@ def register_explorer_tools(mcp: FastMCP) -> None:
     def qml_explorer_status() -> dict[str, Any]:
         """Check if the QML Gauges Explorer is running (qml-gauges repo).
 
-        Returns the running status, process IDs if running, and whether
-        the WebSocket server is responding.
+        Liveness is verified actively every call — ``pgrep`` for the explorer
+        binary plus a real WebSocket round-trip — so a stale instance left over
+        from a *previous* MCP session (one this server never launched) is still
+        reported as ``running: True``. In that case ``managed_by_session`` is
+        ``False``: the explorer is alive but this server has no record of it, so
+        ``qml_explorer_launch`` will just attach to it (no log capture) and
+        ``qml_explorer_logs_get`` won't work. Run ``qml_explorer_kill`` then
+        ``qml_explorer_launch`` to bring it under this session's management.
 
         Returns:
-            Status dict with 'running', 'pids', and 'websocket_connected' fields
+            {
+              "running": bool,                 # any explorer process alive
+              "pids": [str, ...],               # all explorer PIDs (pgrep)
+              "websocket_connected": bool,      # WS state server answered
+              "managed_by_session": bool|None,  # True iff a running PID was
+                                                # launched by THIS server;
+                                                # None when nothing is running
+              "session_pids": [int, ...],       # running PIDs this server launched
+              "foreign_pids": [int, ...],       # running PIDs it did not
+              "hint": str,                      # present only when action is useful
+            }
         """
         result: dict[str, Any] = {
             "running": False,
             "pids": [],
             "websocket_connected": False,
+            "managed_by_session": None,
+            "session_pids": [],
+            "foreign_pids": [],
         }
 
         # Check for running processes
@@ -251,6 +270,23 @@ def register_explorer_tools(mcp: FastMCP) -> None:
                 result["pids"] = [p for p in pgrep_result.stdout.strip().split("\n") if p]
         except Exception:
             pass
+
+        # Partition running PIDs into those this session launched and the rest.
+        running_pids_int = {int(p) for p in result["pids"] if p.isdigit()}
+        session_known = set(_LAUNCHED_LOG_PATHS.keys())
+        session_pids = sorted(running_pids_int & session_known)
+        foreign_pids = sorted(running_pids_int - session_known)
+        result["session_pids"] = session_pids
+        result["foreign_pids"] = foreign_pids
+        if result["running"]:
+            result["managed_by_session"] = bool(session_pids)
+            if foreign_pids and not session_pids:
+                result["hint"] = (
+                    "An explorer is running that this MCP session did not launch "
+                    "(likely a leftover from a prior session). qml_explorer_logs_get "
+                    "won't have its output. Run qml_explorer_kill then "
+                    "qml_explorer_launch to manage it from this session."
+                )
 
         # Check WebSocket connectivity
         if WEBSOCKETS_AVAILABLE:

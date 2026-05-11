@@ -221,6 +221,47 @@ class LaunchEnvTests(unittest.TestCase):
         self.assertIs(popen.call_args.kwargs["stderr"], explorer.subprocess.STDOUT)
 
 
+class StatusManagementTests(unittest.TestCase):
+    """qml_explorer_status's session-vs-foreign partitioning of running PIDs."""
+
+    def _status_with(self, *, pgrep_stdout: str | None, launched: dict):
+        """Run qml_explorer_status with pgrep faked and _LAUNCHED_LOG_PATHS set."""
+        if pgrep_stdout is None:
+            completed = subprocess_result(returncode=1, stdout="")
+        else:
+            completed = subprocess_result(returncode=0, stdout=pgrep_stdout)
+
+        tools = _explorer_tools()
+        with mock.patch.object(explorer.subprocess, "run", return_value=completed), \
+             mock.patch.dict(explorer._LAUNCHED_LOG_PATHS, launched, clear=True), \
+             mock.patch.object(explorer, "WEBSOCKETS_AVAILABLE", False):
+            return tools["qml_explorer_status"]()
+
+    def test_running_pid_launched_by_session_is_managed(self):
+        from pathlib import Path
+        r = self._status_with(pgrep_stdout="12345\n67890\n", launched={12345: Path("/tmp/a.log")})
+        self.assertTrue(r["running"])
+        self.assertIs(r["managed_by_session"], True)
+        self.assertEqual(r["session_pids"], [12345])
+        self.assertEqual(r["foreign_pids"], [67890])
+        self.assertNotIn("hint", r)
+
+    def test_running_but_foreign_only_gets_a_hint(self):
+        r = self._status_with(pgrep_stdout="55555\n", launched={})
+        self.assertTrue(r["running"])
+        self.assertIs(r["managed_by_session"], False)
+        self.assertEqual(r["session_pids"], [])
+        self.assertEqual(r["foreign_pids"], [55555])
+        self.assertIn("hint", r)
+        self.assertIn("qml_explorer_kill", r["hint"])
+
+    def test_not_running_leaves_managed_by_session_none(self):
+        r = self._status_with(pgrep_stdout=None, launched={})
+        self.assertFalse(r["running"])
+        self.assertIsNone(r["managed_by_session"])
+        self.assertEqual(r["pids"], [])
+
+
 def subprocess_result(*, returncode: int, stdout: str):
     """A minimal stand-in for subprocess.CompletedProcess (only fields we read)."""
     import subprocess as _sp

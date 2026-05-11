@@ -112,6 +112,7 @@ Configuration can be set in `.env` or as environment variables:
 | `qml_explorer_build` | Build the explorer (cmake configure + build) |
 | `qml_explorer_launch` | Launch explorer with correct library paths |
 | `qml_explorer_kill` | Kill running explorer processes |
+| `qml_explorer_status` | Whether an explorer is running, and whether *this* session launched it (`managed_by_session`) |
 | `qml_explorer_get_state` | Get current page and property values |
 | `qml_explorer_navigate` | Navigate to a component page (valid pages discovered from the explorer source at call time; confirms the page actually switched) |
 | `qml_explorer_get_property` | Get a single property value |
@@ -153,6 +154,15 @@ represent the declared type (`"yes"` for a bool, `NaN` for a number, `"1.5"`
 for an int) is rejected with an error instead of being silently miscoerced.
 Prefer passing JSON values of the natural type (`true`/`false`, numbers); the
 string forms are a convenience.
+
+`qml_explorer_status` verifies liveness actively on every call (`pgrep` for the
+explorer binary plus a real WebSocket round-trip), so an instance left running
+by a *previous* MCP session still reports `running: true`. When it does, it also
+reports `managed_by_session`: `false` means this server didn't launch it (so
+`qml_explorer_logs_get` has no log for it, and `qml_explorer_launch` would just
+attach to it) — `qml_explorer_kill` then `qml_explorer_launch` brings it under
+this session's management. `session_pids` / `foreign_pids` break the running
+PIDs down accordingly.
 
 `qml_explorer_navigate` validates the page name against the explorer's actual
 `explorer/qml/pages/*Page.qml` files (resolved at call time via

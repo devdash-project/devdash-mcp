@@ -8,6 +8,15 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ### Fixed
 
+- **`qml_explorer_status` now flags an explorer this session didn't launch.**
+  It already verifies liveness actively (`pgrep` + a WebSocket round-trip), so a
+  leftover instance from a prior MCP session is correctly `running: true` — but
+  callers couldn't tell it apart from one this server manages, and would then
+  hit "logs unavailable" / a silent attach on the next launch. The status
+  response gains `managed_by_session` (bool / `None` when nothing's running),
+  `session_pids`, `foreign_pids`, and — when the only running explorer is a
+  foreign one — a `hint` to kill-then-relaunch.
+
 - **`qml_explorer_logs_get` was always empty — the explorer's output went to
   the journal, not the captured file.** `qml_explorer_launch` redirects the
   explorer's stdout/stderr to a per-PID log file, but Qt's default message
