@@ -149,3 +149,12 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
   Migration: callers that read `result["image"]` should either (a) read
   `result["path"]` and let downstream tooling load the PNG, or (b) pass
   `inline_thumbnail=True` and read `result["thumbnail_base64"]`.
+
+### Documentation
+
+- Clarified `qml_explorer_get_property`'s `is_bound` semantics (tool docstring
+  and `docs/TOOL_GUIDANCE.md`): `is_bound: False` does not prove a property is
+  unbound — it only means the value came from the explorer's direct
+  `getProperty` lookup rather than the `getState` fallback. The explorer's
+  PropertyPanel publishes resolved values for *all* panel properties, so a
+  theme-bound property such as `faceColor` reports `is_bound: False`.

@@ -425,6 +425,14 @@ def register_explorer_tools(mcp: FastMCP) -> None:
             On failure:
                 {"success": False, "error": <reason>}
 
+        NOTE on is_bound: `is_bound: False` does NOT guarantee the property is
+        not bound — it only means the value was resolved via the explorer's
+        direct getProperty lookup rather than the getState fallback. Since the
+        explorer's PropertyPanel publishes resolved values to the state server
+        for *all* panel properties (bound or not), a theme-bound property such
+        as `faceColor` will return `is_bound: False`. Treat the flag as "value
+        came from direct lookup" rather than "property has no binding."
+
         BREAKING CHANGE (devdash-mcp 0.3.0): previous releases returned the raw
         response from the explorer's WebSocket protocol, which had a different
         shape and could not resolve bound properties. See CHANGELOG.md.
