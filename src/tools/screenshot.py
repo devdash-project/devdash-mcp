@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -239,6 +240,121 @@ def _capture_window_unified(win: dict[str, Any]) -> bytes | None:
     return _capture_x11_window(win["id"])
 
 
+# ---- Window focus management -----------------------------------------------
+#
+# Screenshots must be taken with the target window *focused*. Compositors apply
+# effects to unfocused windows — e.g. Hyprland's `inactive_opacity` plus blur
+# with `xray = true` makes an unfocused window translucent and bleeds the
+# wallpaper through, so a capture of the unfocused explorer looks brighter and
+# more colourful than the user sees in direct view. On Wayland a window on an
+# inactive workspace isn't composited at all, so `grim` would capture the
+# wallpaper. Focusing the window before the capture makes the result match the
+# user's direct view regardless of compositor settings; focus is restored
+# afterwards so the user's interactive flow isn't disrupted (this can briefly
+# flip the active window/workspace).
+
+# Seconds to wait after focusing before capturing, so the compositor finishes
+# any focus-in opacity/blur transition (Hyprland's default fade is ~0.2-0.4s).
+_FOCUS_SETTLE_SECONDS = 0.3
+
+
+def _hyprland_active_address() -> str | None:
+    """Address (``0x...``) of the currently-focused Hyprland window, or None."""
+    stdout, rc = _run_command(["hyprctl", "activewindow", "-j"])
+    if rc != 0:
+        return None
+    try:
+        info = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(info, dict):
+        return None
+    addr = info.get("address")
+    return addr or None
+
+
+def _hyprland_focus(address: str) -> bool:
+    if not address:
+        return False
+    _, rc = _run_command(
+        ["hyprctl", "dispatch", "focuswindow", f"address:{address}"]
+    )
+    return rc == 0
+
+
+def _x11_active_window_id() -> str | None:
+    """Window id of the currently-focused X11 window, or None.
+
+    Uses ``xdotool``; if it isn't installed we simply can't restore focus
+    afterwards (best-effort).
+    """
+    stdout, rc = _run_command(["xdotool", "getactivewindow"])
+    if rc != 0:
+        return None
+    wid = stdout.strip()
+    return wid or None
+
+
+def _x11_focus(window_id: str) -> bool:
+    if not window_id:
+        return False
+    # `wmctrl -i -a` wants a hex id (0x...), which is what our window list
+    # provides. `xdotool windowactivate` accepts hex or decimal and is the
+    # fallback (and the path for ids from `xdotool getactivewindow`, decimal).
+    if window_id.lower().startswith("0x"):
+        _, rc = _run_command(["wmctrl", "-i", "-a", window_id])
+        if rc == 0:
+            return True
+    _, rc = _run_command(["xdotool", "windowactivate", window_id])
+    return rc == 0
+
+
+def _focus_target_window(win: dict[str, Any]) -> tuple[bool, str | None]:
+    """Focus ``win``. Returns ``(focused_ok, prior_focus_token)``.
+
+    ``prior_focus_token`` identifies the previously-focused window for the
+    current session type (Hyprland address / X11 window id), suitable to pass
+    to :func:`_restore_focus`, or ``None`` if it couldn't be determined.
+    """
+    target_id = win.get("id", "")
+    if SESSION_TYPE == "wayland":
+        prior = _hyprland_active_address()
+        return _hyprland_focus(target_id), prior
+    prior = _x11_active_window_id()
+    return _x11_focus(target_id), prior
+
+
+def _restore_focus(token: str | None) -> None:
+    """Best-effort: re-focus the window identified by ``token``. No-op if None."""
+    if not token:
+        return
+    if SESSION_TYPE == "wayland":
+        _hyprland_focus(token)
+    else:
+        _x11_focus(token)
+
+
+def _capture_focused(win: dict[str, Any]) -> tuple[bytes | None, bool]:
+    """Focus ``win``, capture it, then restore prior focus.
+
+    Returns ``(png_bytes_or_None, focused_ok)``. Focusing the window before the
+    capture avoids compositor effects applied to *unfocused* windows
+    (translucency, blur xray bleeding the wallpaper through, an inactive
+    workspace that isn't composited). If focusing fails we still attempt the
+    capture (the image may be distorted; ``focused_ok`` is ``False``). Prior
+    focus is restored afterwards on a best-effort basis, unless the target was
+    already the focused window.
+    """
+    focused_ok, prior_focus = _focus_target_window(win)
+    if focused_ok:
+        # Let the compositor finish any focus-in opacity/blur transition.
+        time.sleep(_FOCUS_SETTLE_SECONDS)
+    data = _capture_window_unified(win)
+    if focused_ok and prior_focus and prior_focus != win.get("id", ""):
+        _restore_focus(prior_focus)
+    return data, focused_ok
+
+
 # ---- PIL post-processing ---------------------------------------------------
 
 def _apply_crop_left(data: bytes, fraction: float) -> bytes:
@@ -367,7 +483,10 @@ def register_screenshot_tools(mcp: FastMCP) -> None:
                 "available_windows": available,
             }
 
-        data = _capture_window_unified(win)
+        # Capture with the window focused so compositor effects on unfocused
+        # windows (translucency, blur xray, un-composited inactive workspaces)
+        # don't distort the result; prior focus is restored afterwards.
+        data, focused_ok = _capture_focused(win)
         if not data:
             tool_hint = (
                 "Make sure 'grim' is installed." if SESSION_TYPE == "wayland"
@@ -390,7 +509,15 @@ def register_screenshot_tools(mcp: FastMCP) -> None:
             "width": width,
             "height": height,
             "window_id": win.get("id", ""),
+            "focused": focused_ok,
         }
+        if not focused_ok:
+            result["focus_warning"] = (
+                "Could not focus the target window before capture; the image "
+                "may show compositor effects applied to unfocused windows "
+                "(translucency / blur / un-composited workspace). Check that "
+                "hyprctl (Wayland) or wmctrl/xdotool (X11) is installed."
+            )
         if inline_thumbnail:
             b64, tw, th = _make_thumbnail(path, thumbnail_max_dim)
             result["thumbnail_base64"] = b64
@@ -419,8 +546,17 @@ def register_screenshot_tools(mcp: FastMCP) -> None:
         results to a human, not for programmatic analysis — use the disk path
         plus the image tools for analysis).
 
-        Composition: window capture -> optional left-/center-crop -> optional
-        scale -> optional roi crop -> save to disk -> optional thumbnail.
+        The target window is focused before the capture (and the previously
+        focused window restored afterwards) so the image matches the user's
+        direct view rather than the compositor's treatment of an unfocused
+        window — translucency, blur xray bleeding the wallpaper through, or an
+        inactive workspace that isn't composited at all. Briefly flips the
+        active window/workspace as a side effect. ``focused`` in the result
+        reports whether this succeeded.
+
+        Composition: focus window -> window capture -> restore focus ->
+        optional left-/center-crop -> optional scale -> optional roi crop ->
+        save to disk -> optional thumbnail.
 
         Args:
             window: Window name (case-insensitive substring match on title or
@@ -442,13 +578,15 @@ def register_screenshot_tools(mcp: FastMCP) -> None:
                   "width": int,
                   "height": int,
                   "window_id": str,
+                  "focused": bool,          # window was focused before capture
+                  "focus_warning": str,     # only when "focused" is False
                   # only when inline_thumbnail=True:
                   "thumbnail_base64": str,
                   "thumbnail_width": int,
                   "thumbnail_height": int,
                   "thumbnail_mime_type": "image/png",
                 }
-            On failure: {"error": <reason>}.
+            On failure (window not found, capture tool missing): {"error": <reason>}.
         """
         scale = max(0.3, min(1.0, scale))
         if crop_center is not None:
@@ -475,6 +613,11 @@ def register_screenshot_tools(mcp: FastMCP) -> None:
 
         Crops to LEFT 60% (preview pane), then CENTER 80% (gauge), scaled 0.5.
         Works on X11 and Wayland (Hyprland) — session auto-detected.
+
+        Like ``screenshot_capture``, the target window is focused before the
+        capture (and prior focus restored afterwards) so the image matches the
+        user's direct view rather than the compositor's unfocused-window
+        treatment.
 
         Pixel data is opt-in. Default response is path + dimensions; pass
         ``inline_thumbnail=True`` to also include a base64 preview.
