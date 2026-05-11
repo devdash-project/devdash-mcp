@@ -8,6 +8,10 @@ then cropped to the target window's geometry with Pillow. The legacy X11 path
 
 External binaries required (Wayland):  grim, hyprctl
 External binaries required (X11):      wmctrl or xwininfo, ImageMagick `import` or scrot
+
+By default the screenshot tools return a path to the saved PNG on disk plus
+its dimensions; pixel data is opt-in via ``inline_thumbnail`` to keep agent
+context small. See tool docstrings for the response shape.
 """
 
 import base64
@@ -23,6 +27,10 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from PIL import Image
+
+# Directory for saved screenshot PNGs. Created on first use; not cleaned up
+# automatically (caller is responsible for managing scratch space).
+SCREENSHOT_DIR = Path(tempfile.gettempdir()) / "devdash-mcp-screenshots"
 
 logger = logging.getLogger(__name__)
 
@@ -302,11 +310,49 @@ def register_screenshot_tools(mcp: FastMCP) -> None:
             "count": len(filtered),
         }
 
+    def _save_png(data: bytes, prefix: str) -> tuple[Path, int, int]:
+        SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        img = Image.open(BytesIO(data))
+        w, h = img.size
+        fd, raw_path = tempfile.mkstemp(prefix=f"{prefix}_", suffix=".png", dir=SCREENSHOT_DIR)
+        os.close(fd)
+        path = Path(raw_path)
+        path.write_bytes(data)
+        return path, w, h
+
+    def _make_thumbnail(path: Path, max_dim: int) -> tuple[str, int, int]:
+        img = Image.open(path)
+        w, h = img.size
+        if max(w, h) <= max_dim:
+            scaled = img.copy()
+        else:
+            scale = max_dim / float(max(w, h))
+            scaled = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+        out = BytesIO()
+        scaled.save(out, format="PNG")
+        sw, sh = scaled.size
+        return base64.b64encode(out.getvalue()).decode("utf-8"), sw, sh
+
+    def _apply_roi(data: bytes, roi: dict[str, int]) -> bytes:
+        img = Image.open(BytesIO(data))
+        w, h = img.size
+        x = max(0, min(w, int(roi["x"])))
+        y = max(0, min(h, int(roi["y"])))
+        rw = max(1, min(w - x, int(roi["width"])))
+        rh = max(1, min(h - y, int(roi["height"])))
+        out = BytesIO()
+        img.crop((x, y, x + rw, y + rh)).save(out, format="PNG")
+        return out.getvalue()
+
     def _internal_capture(
         window: str,
         scale: float,
         crop_left: float | None = None,
         crop_center: float | None = None,
+        roi: dict[str, int] | None = None,
+        prefix: str = "screenshot",
+        inline_thumbnail: bool = False,
+        thumbnail_max_dim: int = 400,
     ) -> dict[str, Any]:
         win = _find_window_unified(window)
         if not win:
@@ -335,70 +381,124 @@ def register_screenshot_tools(mcp: FastMCP) -> None:
             data = _apply_crop_center(data, crop_center)
         if scale < 1.0:
             data = _apply_scale(data, scale)
+        if roi is not None:
+            data = _apply_roi(data, roi)
 
-        return {
-            "result": {
-                "image": base64.b64encode(data).decode("utf-8"),
-                "mime_type": "image/png",
-                "window_id": win.get("id", ""),
-            }
+        path, width, height = _save_png(data, prefix)
+        result: dict[str, Any] = {
+            "path": str(path),
+            "width": width,
+            "height": height,
+            "window_id": win.get("id", ""),
         }
+        if inline_thumbnail:
+            b64, tw, th = _make_thumbnail(path, thumbnail_max_dim)
+            result["thumbnail_base64"] = b64
+            result["thumbnail_width"] = tw
+            result["thumbnail_height"] = th
+            result["thumbnail_mime_type"] = "image/png"
+        return result
 
     @mcp.tool()
     def screenshot_capture(
         window: str,
         scale: float = 0.5,
         crop_center: float | None = None,
+        roi: dict[str, int] | None = None,
+        inline_thumbnail: bool = False,
+        thumbnail_max_dim: int = 400,
     ) -> dict[str, Any]:
         """Capture a PNG screenshot of a window.
 
-        Works on X11 and Wayland (Hyprland). Session type is auto-detected
-        at server startup from XDG_SESSION_TYPE.
+        Works on X11 and Wayland (Hyprland). Session type is auto-detected at
+        server startup from XDG_SESSION_TYPE.
+
+        Pixel data is opt-in. By default this tool writes the PNG to disk and
+        returns its path plus dimensions. Set ``inline_thumbnail=True`` to also
+        receive a base64-encoded downsampled preview (intended for surfacing
+        results to a human, not for programmatic analysis — use the disk path
+        plus the image tools for analysis).
+
+        Composition: window capture -> optional left-/center-crop -> optional
+        scale -> optional roi crop -> save to disk -> optional thumbnail.
 
         Args:
             window: Window name (case-insensitive substring match on title or
-                    on Wayland class).
+                    class).
             scale: Scale factor (0.3-1.0, default 0.5).
-            crop_center: Crop to center portion before scaling (0.1-1.0, optional).
+            crop_center: Crop to center portion before ROI (0.1-1.0, optional).
+            roi: {"x", "y", "width", "height"} in post-scale/crop pixel
+                 coordinates. If provided, the saved PNG is cropped to this
+                 region. Clamped to the image bounds.
+            inline_thumbnail: If True, include a base64 thumbnail in the
+                 response. Default False (path-only).
+            thumbnail_max_dim: Longest-side cap for the thumbnail in pixels
+                 (default 400). Ignored if inline_thumbnail is False.
 
         Returns:
-            PNG image data (base64) or error.
+            On success:
+                {
+                  "path": "/tmp/devdash-mcp-screenshots/...png",
+                  "width": int,
+                  "height": int,
+                  "window_id": str,
+                  # only when inline_thumbnail=True:
+                  "thumbnail_base64": str,
+                  "thumbnail_width": int,
+                  "thumbnail_height": int,
+                  "thumbnail_mime_type": "image/png",
+                }
+            On failure: {"error": <reason>}.
         """
         scale = max(0.3, min(1.0, scale))
         if crop_center is not None:
             crop_center = max(0.1, min(1.0, crop_center))
 
-        result = _internal_capture(
+        return _internal_capture(
             window=window,
             scale=scale,
             crop_center=crop_center,
+            roi=roi,
+            prefix="capture",
+            inline_thumbnail=inline_thumbnail,
+            thumbnail_max_dim=thumbnail_max_dim,
         )
-        if "error" in result:
-            return result
-        return result["result"]
 
     @mcp.tool()
     def screenshot_gauge_preview(
         window: str = "explorer",
+        roi: dict[str, int] | None = None,
+        inline_thumbnail: bool = False,
+        thumbnail_max_dim: int = 400,
     ) -> dict[str, Any]:
         """Capture a compact screenshot focused on the gauge preview area.
 
-        Crops to LEFT 60% (preview pane), then CENTER 80% (gauge), scaled to 50%.
-        Works on X11 and Wayland (Hyprland) — session is auto-detected.
+        Crops to LEFT 60% (preview pane), then CENTER 80% (gauge), scaled 0.5.
+        Works on X11 and Wayland (Hyprland) — session auto-detected.
+
+        Pixel data is opt-in. Default response is path + dimensions; pass
+        ``inline_thumbnail=True`` to also include a base64 preview.
 
         Args:
             window: Window name (default 'explorer'). Substring match on title
-                    or window class.
+                    or class.
+            roi: Optional {"x", "y", "width", "height"} crop applied AFTER the
+                 default preview/center/scale pipeline, in pixel coordinates
+                 of the cropped+scaled image. Clamped to bounds.
+            inline_thumbnail: If True, include a base64 thumbnail. Default
+                 False (path-only).
+            thumbnail_max_dim: Longest-side cap for the thumbnail (default 400).
 
         Returns:
-            PNG image data (base64) or error.
+            See screenshot_capture for the response shape.
         """
-        result = _internal_capture(
+        return _internal_capture(
             window=window,
             scale=0.5,
             crop_left=0.6,
             crop_center=0.8,
+            roi=roi,
+            prefix="preview",
+            inline_thumbnail=inline_thumbnail,
+            thumbnail_max_dim=thumbnail_max_dim,
         )
-        if "error" in result:
-            return result
-        return result["result"]
