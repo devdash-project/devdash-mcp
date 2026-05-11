@@ -78,6 +78,7 @@ EXPLORER_PAGES = [
     "RollingDigitReadout",
     "RadialGauge",
     "RadialGauge3D",
+    "IndustrialGauge",
 ]
 
 
