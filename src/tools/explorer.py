@@ -9,6 +9,8 @@ import json
 import os
 import signal
 import subprocess
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -21,6 +23,12 @@ except ImportError:
     WEBSOCKETS_AVAILABLE = False
 
 from ..config import get_config
+
+
+# Process-global state for the explorer instance launched by qml_explorer_launch.
+# Keyed by PID. When the MCP server restarts, this is empty -> logs are
+# unavailable for any pre-existing explorer (correct: we have no log file).
+_LAUNCHED_LOG_PATHS: dict[int, Path] = {}
 
 
 def _send_request(request: dict[str, Any], timeout: float = 5.0) -> dict[str, Any]:
@@ -461,14 +469,26 @@ def register_explorer_tools(mcp: FastMCP) -> None:
         env["LD_LIBRARY_PATH"] = f"{config.explorer_lib_path}:{existing_lib_path}"
 
         try:
+            log_dir = Path(tempfile.gettempdir()) / "devdash-mcp-explorer-logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            fd, raw_log_path = tempfile.mkstemp(
+                prefix="explorer_", suffix=".log", dir=log_dir
+            )
+            os.close(fd)
+            log_path = Path(raw_log_path)
+            log_handle = open(log_path, "wb")
+
             process = subprocess.Popen(
                 [config.explorer_executable],
                 cwd=config.qml_gauges_path,
                 env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
+            # Popen retains the fd; close ours so kernel cleans up when
+            # the process exits.
+            log_handle.close()
 
             # Give it a moment to start
             import time
@@ -476,19 +496,90 @@ def register_explorer_tools(mcp: FastMCP) -> None:
 
             # Check if it's still running
             if process.poll() is None:
+                _LAUNCHED_LOG_PATHS[process.pid] = log_path
                 return {
                     "success": True,
                     "message": "Explorer launched successfully",
                     "pid": process.pid,
+                    "log_path": str(log_path),
                 }
             else:
                 return {
                     "success": False,
                     "error": "Explorer exited immediately after launch. Check library dependencies.",
+                    "log_path": str(log_path),
                 }
 
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def qml_explorer_logs_get(tail_lines: int = 200) -> dict[str, Any]:
+        """Retrieve recent stdout/stderr from the explorer.
+
+        Returns the last N lines from the log file populated by the explorer
+        process launched by this MCP session. If the explorer was not launched
+        by this session (e.g. the user started it manually, or the MCP server
+        restarted), this tool returns an explicit error rather than partial
+        data — there is no silent fallback.
+
+        Args:
+            tail_lines: Number of trailing lines to return (default 200,
+                        clamped to [1, 10000]).
+
+        Returns:
+            On success:
+                {
+                  "success": True,
+                  "pid": int,
+                  "log_path": str,
+                  "lines": [str, ...],   # last `tail_lines` lines
+                  "line_count_total": int,
+                  "truncated": bool,     # True if file had more than tail_lines
+                }
+            On failure:
+                {"success": False, "error": <reason>}
+        """
+        tail_lines = max(1, min(10000, int(tail_lines)))
+
+        if not _LAUNCHED_LOG_PATHS:
+            return {
+                "success": False,
+                "error": (
+                    "Explorer logs unavailable: not launched by this MCP "
+                    "session. Relaunch via qml_explorer_kill + "
+                    "qml_explorer_launch to enable log capture."
+                ),
+            }
+
+        # Pick the most-recently-launched still-known PID.
+        # We don't aggressively prune; if a PID is dead but its log file
+        # still exists, that's still the right log to surface.
+        pid, log_path = max(_LAUNCHED_LOG_PATHS.items(), key=lambda kv: kv[0])
+
+        if not log_path.exists():
+            return {
+                "success": False,
+                "error": f"Log file vanished at {log_path}",
+            }
+
+        try:
+            raw = log_path.read_bytes()
+        except OSError as e:
+            return {"success": False, "error": f"Failed to read log: {e}"}
+
+        text = raw.decode("utf-8", errors="replace")
+        all_lines = text.splitlines()
+        total = len(all_lines)
+        kept = all_lines[-tail_lines:]
+        return {
+            "success": True,
+            "pid": pid,
+            "log_path": str(log_path),
+            "lines": kept,
+            "line_count_total": total,
+            "truncated": total > len(kept),
+        }
 
     @mcp.tool()
     def qml_explorer_kill() -> dict[str, Any]:
@@ -519,10 +610,15 @@ def register_explorer_tools(mcp: FastMCP) -> None:
 
             for pid in pids:
                 try:
-                    os.kill(int(pid), signal.SIGTERM)
+                    pid_int = int(pid)
+                except ValueError:
+                    continue
+                try:
+                    os.kill(pid_int, signal.SIGTERM)
                     killed += 1
-                except (ProcessLookupError, ValueError):
+                except ProcessLookupError:
                     pass
+                _LAUNCHED_LOG_PATHS.pop(pid_int, None)
 
             return {
                 "success": True,
