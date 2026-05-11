@@ -33,7 +33,7 @@ def register_logs_tools(mcp: FastMCP) -> None:
         Requires DevDash to be running with DevTools enabled.
 
         Args:
-            count: Number of log entries to retrieve (max 1000, default 100)
+            count: Number of log entries to retrieve (clamped to 1-1000, default 100)
             level: Minimum log level to include (debug, info, warning, critical)
             category: Filter by category (e.g., 'devdash.broker', 'devdash.adapter')
 
@@ -44,7 +44,7 @@ def register_logs_tools(mcp: FastMCP) -> None:
         url = f"{config.devtools_base_url}/api/logs"
 
         params: dict[str, Any] = {
-            "count": min(count, 1000),
+            "count": max(1, min(int(count), 1000)),
             "level": level,
         }
         if category:
