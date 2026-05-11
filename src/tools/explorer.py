@@ -6,6 +6,7 @@ as well as property inspection and modification via WebSocket.
 """
 
 import json
+import math
 import os
 import signal
 import subprocess
@@ -57,6 +58,109 @@ def _send_request(request: dict[str, Any], timeout: float = 5.0) -> dict[str, An
         return {"success": False, "error": f"Timeout connecting to explorer at {url}"}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+# --- Property value coercion -------------------------------------------------
+#
+# MCP tool arguments arrive as JSON, but a caller sometimes supplies a *string*
+# ("false", "12") where the QML property expects a real bool / number. The QML
+# side does `target[name] = value` through the JS engine, where a non-empty
+# string is truthy — so a bare "false" string would set a bool property to
+# *true*. We coerce string inputs to the property's declared type here, at the
+# server boundary, before they reach the explorer. Non-string JSON values
+# (real bools, numbers, lists) already carry their type across the wire and are
+# passed through untouched.
+
+# Allowed string spellings when coercing to a bool property (case-insensitive,
+# surrounding whitespace ignored). Anything else is an explicit error rather
+# than a silent truthy/falsy guess.
+_BOOL_STRINGS_TRUE = frozenset({"true"})
+_BOOL_STRINGS_FALSE = frozenset({"false"})
+
+
+class PropertyCoercionError(ValueError):
+    """A string value couldn't be coerced to a property's declared type."""
+
+
+def _coerce_value(value: Any, declared_type: str | None) -> Any:
+    """Coerce an MCP-supplied value to a QML property's declared type.
+
+    Non-string values pass through unchanged — JSON already preserved bool /
+    int / float / list / dict / None across the wire. String values are
+    coerced based on ``declared_type`` (from the page's property metadata):
+
+      * ``bool``  -> ``"true"`` / ``"false"`` (case-insensitive, surrounding
+        whitespace ignored). Any other string raises ``PropertyCoercionError``
+        instead of being silently treated as truthy.
+      * ``int``   -> parsed integer; non-numeric or non-integral strings raise.
+      * ``real``  -> parsed float; non-numeric / NaN / infinity raise.
+      * ``color`` / ``string`` / ``enum`` / unknown / ``None`` -> left as the
+        original string (Qt parses colour names and hex; enum values are
+        strings; and when the type is unknown we don't guess).
+
+    Raises:
+        PropertyCoercionError: the string can't represent the declared type.
+    """
+    if not isinstance(value, str):
+        # bool is a subclass of int in Python, but json.dumps already
+        # serialised it correctly; numbers and containers likewise.
+        return value
+
+    kind = (declared_type or "").strip().lower()
+
+    if kind == "bool":
+        token = value.strip().lower()
+        if token in _BOOL_STRINGS_TRUE:
+            return True
+        if token in _BOOL_STRINGS_FALSE:
+            return False
+        allowed = sorted(_BOOL_STRINGS_TRUE | _BOOL_STRINGS_FALSE)
+        raise PropertyCoercionError(
+            f"cannot set a bool property from {value!r}; "
+            f"expected one of {allowed} (case-insensitive)"
+        )
+
+    if kind in ("int", "real"):
+        token = value.strip()
+        try:
+            number = float(token)
+        except ValueError:
+            raise PropertyCoercionError(
+                f"cannot set a {kind} property from {value!r} (not a number)"
+            ) from None
+        if not math.isfinite(number):
+            raise PropertyCoercionError(
+                f"cannot set a {kind} property from {value!r} (NaN/infinity)"
+            )
+        if kind == "int":
+            if number != int(number):
+                raise PropertyCoercionError(
+                    f"cannot set an int property from {value!r} (not an integer)"
+                )
+            return int(number)
+        return number
+
+    # color / string / enum / unknown / None: pass the string through unchanged.
+    return value
+
+
+def _property_type_from_metadata(name: str) -> str | None:
+    """Return the declared type of ``name`` on the current page, or ``None``.
+
+    Reads the page's property metadata (the same array the explorer's
+    PropertyPanel is built from, exposed via ``getState``). Returns ``None`` if
+    the explorer is unreachable or the property isn't described there — in that
+    case the caller falls back to passing the value through without coercion.
+    """
+    state = _send_request({"action": "getState"})
+    if not (isinstance(state, dict) and state.get("success")):
+        return None
+    data = state.get("data") or {}
+    for entry in data.get("propertyMetadata") or []:
+        if isinstance(entry, dict) and entry.get("name") == name:
+            declared = entry.get("type")
+            return declared if isinstance(declared, str) else None
+    return None
 
 
 # Valid component pages in the explorer
@@ -329,14 +433,48 @@ def register_explorer_tools(mcp: FastMCP) -> None:
     def qml_explorer_set_property(name: str, value: Any) -> dict[str, Any]:
         """Set a property value on the current component in the QML Gauges Explorer (qml-gauges repo).
 
+        Value typing: prefer JSON values of the property's natural type —
+        ``true`` / ``false`` for ``bool`` properties, numbers for ``real`` /
+        ``int`` properties, strings for ``color`` / ``string`` / ``enum``
+        properties. As a convenience, string forms are also accepted and
+        coerced to the property's declared type (looked up from the page's
+        metadata): ``"true"`` / ``"false"`` (case-insensitive) become booleans
+        and numeric strings become numbers. A string that can't represent the
+        declared type — e.g. ``"yes"`` for a ``bool`` property, or ``"x"`` for
+        a ``real`` property — is rejected with an error rather than being
+        silently miscoerced. (Historically a bare ``"false"`` was truthy on the
+        QML side and would set a ``bool`` property to *true*.)
+
         Args:
-            name: Property name (e.g., 'tickShape', 'color', 'hasGlow')
-            value: Value to set (type depends on property: string, number, boolean, color hex)
+            name: Property name (e.g., 'tickShape', 'color', 'hasGlow').
+            value: New value. JSON bool / number / string; string forms of
+                   booleans and numbers are coerced to the property's declared
+                   type.
 
         Returns:
-            Result with success status
+            On success: the explorer's response. When a string argument was
+            coerced to another type, the response also carries
+            ``coerced_value`` (the value actually sent) and ``original_value``.
+            On a coercion failure: ``{"success": False, "error": <reason>,
+            "declared_type": <type or None>}`` — nothing is sent to the
+            explorer.
         """
-        return _send_request({"action": "setProperty", "name": name, "value": value})
+        declared_type = _property_type_from_metadata(name)
+        try:
+            coerced = _coerce_value(value, declared_type)
+        except PropertyCoercionError as exc:
+            return {
+                "success": False,
+                "error": f"Cannot set property '{name}': {exc}",
+                "declared_type": declared_type,
+            }
+        response = _send_request(
+            {"action": "setProperty", "name": name, "value": coerced}
+        )
+        if isinstance(response, dict) and coerced != value:
+            # Surface the coercion so the caller can see what was actually sent.
+            return {**response, "coerced_value": coerced, "original_value": value}
+        return response
 
     @mcp.tool()
     def qml_explorer_list_properties() -> dict[str, Any]:
