@@ -167,11 +167,21 @@ def _property_type_from_metadata(name: str) -> str | None:
 #
 # The explorer's component pages are one ``<Name>Page.qml`` file each under
 # explorer/qml/pages/ (so ``BezelScrewsPage.qml`` is page "BezelScrews"). The
-# authoritative list is therefore discovered from that directory at call time —
-# adding a page no longer requires restarting the MCP server. The constant
-# below is only a last-resort fallback for when the explorer source tree can't
-# be located (``DEVDASH_QML_GAUGES_PATH`` unset / not a checkout, e.g. when the
-# MCP server is talking to a remote explorer).
+# list is discovered at call time so adding a page never requires restarting
+# the MCP server. Sources, in priority order:
+#
+#   1. The local qml-gauges checkout's ``explorer/qml/pages/*Page.qml`` files
+#      (when ``DEVDASH_QML_GAUGES_PATH`` points at a checkout).
+#   2. The running explorer's ``getState`` response, *if* it carries a
+#      ``data.pages`` array. Current explorer builds don't — see the
+#      qml-gauges-side recommendation to add one (it's the only source that
+#      works when the MCP server talks to a remote explorer with no local
+#      source tree). This path is a no-op until that lands.
+#   3. The hardcoded :data:`_FALLBACK_EXPLORER_PAGES` below — last resort only.
+#
+# TODO(qml-gauges): have StateServer::handleRequest's "getState" include
+# ``data["pages"]`` (the keys of Main.qml's pageIndexMap). Then this module
+# needs no qml-gauges-side coupling at all, even without a local checkout.
 _FALLBACK_EXPLORER_PAGES = [
     "Welcome",
     "BezelScrews",
@@ -195,14 +205,30 @@ _FALLBACK_EXPLORER_PAGES = [
 ]
 
 
+def _pages_from_state() -> list[str]:
+    """Return the page list the running explorer advertises, or ``[]``.
+
+    Reads ``getState``'s ``data.pages`` array. Current explorer builds don't
+    populate it (see the module-level TODO), so this returns ``[]`` for them —
+    callers fall through to the next discovery source.
+    """
+    state = _send_request({"action": "getState"})
+    if not (isinstance(state, dict) and state.get("success")):
+        return []
+    pages = (state.get("data") or {}).get("pages")
+    if isinstance(pages, list) and pages and all(isinstance(p, str) and p for p in pages):
+        return sorted(pages)
+    return []
+
+
 def _discover_explorer_pages() -> tuple[list[str], bool]:
     """Return ``(page_names, discovered)``.
 
-    Scans ``<qml_gauges_path>/explorer/qml/pages/*Page.qml`` and strips the
-    ``Page`` suffix from each stem. ``discovered`` is ``True`` when that
-    directory was readable and produced at least one page; otherwise the
-    hardcoded :data:`_FALLBACK_EXPLORER_PAGES` is returned with
-    ``discovered=False``.
+    Tries, in order: (1) ``<qml_gauges_path>/explorer/qml/pages/*Page.qml``
+    stems (``Page`` suffix stripped), (2) the running explorer's ``getState``
+    ``data.pages`` array, (3) the hardcoded :data:`_FALLBACK_EXPLORER_PAGES`.
+    ``discovered`` is ``True`` for (1) and (2); ``False`` only when the
+    hardcoded fallback is returned.
     """
     base = get_config().qml_gauges_path
     if base:
@@ -217,6 +243,11 @@ def _discover_explorer_pages() -> tuple[list[str], bool]:
             names = []
         if names:
             return names, True
+
+    from_state = _pages_from_state()
+    if from_state:
+        return from_state, True
+
     return list(_FALLBACK_EXPLORER_PAGES), False
 
 

@@ -16,6 +16,8 @@ Differences from the real server, on purpose:
   type-coercion fix is *what reaches the explorer*, so tests assert on that.
 * ``navigate`` can be told not to switch (``navigate_switches=False``) to
   simulate a page that exists as a file but isn't wired into ``Main.qml``.
+* ``pages=[...]`` makes ``getState``'s ``data`` carry a ``pages`` array (the
+  proposed qml-gauges enhancement); leaving it ``None`` mimics current builds.
 """
 
 from __future__ import annotations
@@ -40,11 +42,15 @@ class FakeExplorer:
         properties: dict[str, Any] | None = None,
         property_metadata: list[dict[str, Any]] | None = None,
         navigate_switches: bool = True,
+        pages: list[str] | None = None,
     ) -> None:
         self.page = page
         self.properties: dict[str, Any] = dict(properties or {})
         self.property_metadata: list[dict[str, Any]] = list(property_metadata or [])
         self.navigate_switches = navigate_switches
+        # When not None, getState's data carries a "pages" array (the future
+        # qml-gauges-side enhancement); None mimics current explorer builds.
+        self.pages = pages
 
         # Wire-level audit trails.
         self.received_set: list[tuple[Any, Any]] = []       # (name, value) as received
@@ -65,15 +71,15 @@ class FakeExplorer:
             return {"success": True, "data": {"pong": True, "listening": True}}
 
         if action == "getState":
-            return {
-                "success": True,
-                "data": {
-                    "page": self.page,
-                    "pageTitle": self.page,
-                    "properties": dict(self.properties),
-                    "propertyMetadata": list(self.property_metadata),
-                },
+            data: dict[str, Any] = {
+                "page": self.page,
+                "pageTitle": self.page,
+                "properties": dict(self.properties),
+                "propertyMetadata": list(self.property_metadata),
             }
+            if self.pages is not None:
+                data["pages"] = list(self.pages)
+            return {"success": True, "data": data}
 
         if action == "getProperty":
             name = req.get("name")

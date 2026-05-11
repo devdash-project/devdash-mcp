@@ -184,11 +184,32 @@ class DiscoverPagesTests(unittest.TestCase):
         self.assertTrue(discovered)
         self.assertEqual(names, ["BezelScrews", "GaugeArc", "Welcome"])
 
-    def test_falls_back_when_path_unset(self):
-        with mock.patch.object(explorer, "get_config", return_value=Config(qml_gauges_path="")):
+    def test_falls_back_when_path_unset_and_explorer_has_no_pages(self):
+        # Path unset -> no filesystem source; explorer (none / no `pages`) ->
+        # no state source; so the hardcoded list, discovered=False.
+        with mock.patch.object(explorer, "get_config", return_value=Config(qml_gauges_path="")), \
+             mock.patch.object(explorer, "_pages_from_state", return_value=[]):
             names, discovered = explorer._discover_explorer_pages()
         self.assertFalse(discovered)
         self.assertEqual(names, explorer._FALLBACK_EXPLORER_PAGES)
+
+    def test_uses_explorer_state_pages_when_no_local_checkout(self):
+        # No local checkout, but the running explorer advertises a `pages` list
+        # via getState -> that becomes the source (discovered=True), even
+        # though it isn't the hardcoded fallback.
+        with fake_explorer(pages=["Welcome", "RadialGauge", "FuturePage"]) as fx:
+            cfg = Config(qml_gauges_path="", explorer_ws_host="localhost", explorer_ws_port=fx.port)
+            with mock.patch.object(explorer, "get_config", return_value=cfg):
+                names, discovered = explorer._discover_explorer_pages()
+        self.assertTrue(discovered)
+        self.assertEqual(names, ["FuturePage", "RadialGauge", "Welcome"])
+
+    def test_pages_from_state_empty_when_explorer_omits_pages(self):
+        # Current explorer builds: getState has no `pages` key.
+        with fake_explorer() as fx:
+            cfg = Config(explorer_ws_host="localhost", explorer_ws_port=fx.port)
+            with mock.patch.object(explorer, "get_config", return_value=cfg):
+                self.assertEqual(explorer._pages_from_state(), [])
 
 
 class LaunchEnvTests(unittest.TestCase):

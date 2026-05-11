@@ -164,10 +164,13 @@ attach to it) — `qml_explorer_kill` then `qml_explorer_launch` brings it under
 this session's management. `session_pids` / `foreign_pids` break the running
 PIDs down accordingly.
 
-`qml_explorer_navigate` validates the page name against the explorer's actual
-`explorer/qml/pages/*Page.qml` files (resolved at call time via
-`DEVDASH_QML_GAUGES_PATH`), so a freshly added page works without restarting
-the MCP server. It also confirms via `getState` that the explorer really
+`qml_explorer_navigate` validates the page name against a list discovered at
+call time, so a freshly added page works without restarting the MCP server.
+Discovery order: the local checkout's `explorer/qml/pages/*Page.qml` files
+(via `DEVDASH_QML_GAUGES_PATH`); then the running explorer's `getState`
+`data.pages` array (a no-op until qml-gauges exposes that field, but the only
+source that works against a remote explorer with no local checkout); then a
+hardcoded fallback. It also confirms via `getState` that the explorer really
 switched, and reports a failure (rather than a false success) if it didn't —
 e.g. a page file that exists but isn't registered in `Main.qml`'s
 `pageIndexMap`. The success response includes `pages` (the current valid set).

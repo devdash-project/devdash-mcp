@@ -71,14 +71,16 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 - **`qml_explorer_navigate` discovers valid pages dynamically.** The set of
   valid page names was hardcoded in the server (`EXPLORER_PAGES`) and went
   stale until the MCP server was restarted whenever an explorer page was
-  added. The tool now derives the list at call time from the explorer's
-  `explorer/qml/pages/*Page.qml` files (with the old hardcoded list kept only
-  as a fallback for when the explorer source tree can't be located). It also
-  confirms the navigation actually took (via `getState`) and reports a failure
-  — rather than a false success — when the explorer stays on a different page
-  (e.g. a page file that exists but isn't wired into `Main.qml`'s
-  `pageIndexMap`). On success the response now includes `pages` (the current
-  valid set).
+  added. The tool now derives the list at call time, in priority order: the
+  local checkout's `explorer/qml/pages/*Page.qml` files; failing that, the
+  running explorer's `getState` `data.pages` array (a no-op until qml-gauges
+  adds that field — see the TODO in `src/tools/explorer.py` — but the only
+  source that works against a remote explorer with no local source tree);
+  failing that, the old hardcoded list. It also confirms the navigation
+  actually took (via `getState`) and reports a failure — rather than a false
+  success — when the explorer stays on a different page (e.g. a page file that
+  exists but isn't wired into `Main.qml`'s `pageIndexMap`). On success the
+  response includes `pages` (the current valid set).
 
 - `devdash_logs_get` clamps `count` to at least 1 (it already capped at 1000).
 
