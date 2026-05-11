@@ -6,6 +6,22 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+### Added
+
+- **`qml_explorer_measure_frame_time` and a `render_timing` flag on
+  `qml_explorer_launch`.** A relaunch with `render_timing=True` adds
+  `QSG_RENDER_TIMING=1` plus a `qt.scenegraph.time.*=true` rule to the
+  explorer's environment, so every frame of Qt's threaded renderloop
+  appears in the captured stderr log as
+  `frame rendered in Nms, ..., perWindowFrameDelta=D`. The measurement
+  tool then samples that log over a configurable window and returns
+  aggregate stats — render-cost mean/p50/p95/max/stddev, frame-interval
+  same, and the fraction of intervals that hit a 60 fps budget. Render
+  costs are integer-millisecond from Qt itself; the tool is best for
+  spotting whole-millisecond regressions, not for sub-ms tuning. Useful
+  for comparing alternative implementations (e.g. 2D vs Qt-Quick-3D
+  components) on the same hardware.
+
 ### Fixed
 
 - **`qml_explorer_status` now flags an explorer this session didn't launch.**

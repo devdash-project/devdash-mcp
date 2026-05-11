@@ -8,9 +8,12 @@ as well as property inspection and modification via WebSocket.
 import json
 import math
 import os
+import re
 import signal
+import statistics
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +33,50 @@ from ..config import get_config
 # Keyed by PID. When the MCP server restarts, this is empty -> logs are
 # unavailable for any pre-existing explorer (correct: we have no log file).
 _LAUNCHED_LOG_PATHS: dict[int, Path] = {}
+
+
+# QSG_RENDER_TIMING lines look like (Qt 6.x, threaded renderloop):
+#   qt.scenegraph.time.renderloop: [window 0x...][gui thread] syncAndRender:
+#     frame rendered in <N>ms, polish=..., sync=..., render=..., swap=...,
+#     perWindowFrameDelta=<D>
+# Integer-ms only. ``perWindowFrameDelta`` is the wall-clock gap between
+# successive frames for the same window (i.e. 1000 / FPS).
+_QSG_FRAME_LINE = re.compile(
+    r"qt\.scenegraph\.time\.renderloop:.*?frame rendered in (\d+)ms"
+    r".*?perWindowFrameDelta=(\d+)"
+)
+
+
+def _parse_qsg_render_timing(text: str) -> tuple[list[float], list[float]]:
+    """Extract (render_cost_ms, frame_interval_ms) from a QSG_RENDER_TIMING block.
+
+    Both values come from the threaded renderloop's ``syncAndRender``
+    summary line; integer-millisecond precision. Frames with
+    ``perWindowFrameDelta=0`` are dropped from the interval series — those
+    are first-frame / coalesced-paint artefacts, not real frame pacing.
+    """
+    render_costs: list[float] = []
+    intervals: list[float] = []
+    for line in text.splitlines():
+        match = _QSG_FRAME_LINE.search(line)
+        if not match:
+            continue
+        render_costs.append(float(match.group(1)))
+        delta = float(match.group(2))
+        if delta > 0:
+            intervals.append(delta)
+    return render_costs, intervals
+
+
+def _percentile(samples: list[float], pct: float) -> float:
+    """Inclusive nearest-rank percentile. Empty list -> raises."""
+    if not samples:
+        raise ValueError("percentile of empty sample")
+    ordered = sorted(samples)
+    if len(ordered) == 1:
+        return ordered[0]
+    rank = max(0, min(len(ordered) - 1, int(round(pct / 100.0 * (len(ordered) - 1)))))
+    return ordered[rank]
 
 
 def _send_request(request: dict[str, Any], timeout: float = 5.0) -> dict[str, Any]:
@@ -761,7 +808,7 @@ def register_explorer_tools(mcp: FastMCP) -> None:
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
-    def qml_explorer_launch() -> dict[str, Any]:
+    def qml_explorer_launch(render_timing: bool = False) -> dict[str, Any]:
         """Launch the QML Gauges Explorer (qml-gauges repo).
 
         Starts the explorer with the correct library paths. The explorer
@@ -769,6 +816,15 @@ def register_explorer_tools(mcp: FastMCP) -> None:
         and modification.
 
         Requires DEVDASH_QML_GAUGES_PATH to be set in .env or environment.
+
+        Args:
+            render_timing: When True, sets ``QSG_RENDER_TIMING=1`` in the
+                explorer's environment, causing Qt's scene graph to emit a
+                per-frame timing log line on stderr (captured to the same
+                log file ``qml_explorer_logs_get`` reads). This is the
+                prerequisite for ``qml_explorer_measure_frame_time``. Off
+                by default — the per-frame logging adds noise and a small
+                amount of overhead, so opt in only when measuring.
 
         Returns:
             Launch result with PID if successful
@@ -817,6 +873,19 @@ def register_explorer_tools(mcp: FastMCP) -> None:
         # — Qt's default handler otherwise routes to the systemd journal, so the
         # captured log file stays empty. QT_FORCE_STDERR_LOGGING overrides that.
         env["QT_FORCE_STDERR_LOGGING"] = "1"
+
+        if render_timing:
+            # QSG_RENDER_TIMING makes the scene graph emit one
+            # "qt.scenegraph.time.renderloop: ... frame rendered in Nms,
+            # ... perWindowFrameDelta=D" line per frame. The corresponding
+            # logging category has to be enabled too, or Qt suppresses it
+            # at info level. QT_LOGGING_RULES wins over any user config.
+            env["QSG_RENDER_TIMING"] = "1"
+            existing_rules = env.get("QT_LOGGING_RULES", "")
+            rule = "qt.scenegraph.time.*=true"
+            env["QT_LOGGING_RULES"] = (
+                f"{existing_rules};{rule}" if existing_rules else rule
+            )
 
         try:
             log_dir = Path(tempfile.gettempdir()) / "devdash-mcp-explorer-logs"
@@ -929,6 +998,161 @@ def register_explorer_tools(mcp: FastMCP) -> None:
             "lines": kept,
             "line_count_total": total,
             "truncated": total > len(kept),
+        }
+
+    @mcp.tool()
+    def qml_explorer_measure_frame_time(
+        duration_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        """Measure per-frame scene-graph timing over a sampling window.
+
+        Parses ``QSG_RENDER_TIMING`` output from the explorer's captured
+        stderr log over the next ``duration_seconds`` seconds and returns
+        aggregate statistics. Reports two distinct metrics — render cost
+        (CPU/GPU time Qt spent producing a frame) and frame interval
+        (wall-clock gap between consecutive frames, which determines
+        actual FPS):
+
+        Prerequisites:
+          * Explorer must be running and managed by this session
+            (``qml_explorer_launch`` captures the log; a foreign instance
+            doesn't have one).
+          * Explorer must have been launched with ``render_timing=True``;
+            otherwise no scene-graph timing lines are emitted and the
+            tool returns an error pointing to the right relaunch.
+          * Something on the current page should be animating during the
+            window — Qt's threaded renderloop parks when the scene is
+            idle, so a fully static gauge will report ``sample_count: 0``.
+
+        Resolution note: Qt reports frame times in integer milliseconds.
+        That's enough to compare a 2 ms render against an 8 ms render but
+        won't resolve sub-millisecond differences.
+
+        Args:
+            duration_seconds: Sampling window length in seconds. Clamped
+                to ``[0.5, 60.0]``.
+
+        Returns:
+            On success:
+                {
+                  "success": True,
+                  "duration_seconds": float,
+                  "sample_count": int,
+                  "render_cost_ms": {
+                    "mean": float, "max": float, "p50": float,
+                    "p95": float, "std_dev": float,
+                  },
+                  "frame_interval_ms": {
+                    "mean": float, "max": float, "p50": float,
+                    "p95": float, "std_dev": float,
+                  },
+                  "average_frame_time_ms": float,    # render_cost mean,
+                                                     # kept for symmetry
+                                                     # with the request
+                  "max_frame_time_ms": float,        # render_cost max
+                  "std_dev_ms": float,               # render_cost stddev
+                  "target_fps_60_met_fraction": float,
+                      # fraction of frames whose interval <= 16.6 ms;
+                      # ``None`` if no interval samples were captured
+                  "pid": int,
+                  "log_path": str,
+                }
+            On failure:
+                {"success": False, "error": <reason>}
+        """
+        duration = max(0.5, min(60.0, float(duration_seconds)))
+
+        if not _LAUNCHED_LOG_PATHS:
+            return {
+                "success": False,
+                "error": (
+                    "No explorer launched by this MCP session — frame-time "
+                    "measurement reads from the captured stderr log, which "
+                    "doesn't exist for foreign instances. Run "
+                    "qml_explorer_kill then qml_explorer_launch("
+                    "render_timing=True)."
+                ),
+            }
+
+        pid, log_path = max(_LAUNCHED_LOG_PATHS.items(), key=lambda kv: kv[0])
+
+        if not log_path.exists():
+            return {
+                "success": False,
+                "error": f"Log file vanished at {log_path}",
+            }
+
+        # Confirm QSG_RENDER_TIMING is actually emitting. The category prefix
+        # is stable across Qt 6.x. If absent, the explorer was launched
+        # without render_timing.
+        try:
+            existing = log_path.read_bytes()
+        except OSError as e:
+            return {"success": False, "error": f"Failed to read log: {e}"}
+
+        if b"qt.scenegraph.time.renderloop" not in existing:
+            return {
+                "success": False,
+                "error": (
+                    "Explorer was launched without render_timing. Relaunch "
+                    "with qml_explorer_kill then qml_explorer_launch("
+                    "render_timing=True), then retry."
+                ),
+                "pid": pid,
+                "log_path": str(log_path),
+            }
+
+        # Mark the end of the existing log, sleep, then parse only what
+        # was appended during the window. This keeps the measurement
+        # bounded to the requested window even if the log already has
+        # minutes of prior timing data.
+        start_offset = len(existing)
+        time.sleep(duration)
+
+        try:
+            with open(log_path, "rb") as f:
+                f.seek(start_offset)
+                window_bytes = f.read()
+        except OSError as e:
+            return {"success": False, "error": f"Failed to read log: {e}"}
+
+        window_text = window_bytes.decode("utf-8", errors="replace")
+        render_times, intervals = _parse_qsg_render_timing(window_text)
+
+        def _summarise(samples: list[float]) -> dict[str, float] | None:
+            if not samples:
+                return None
+            return {
+                "mean": round(statistics.fmean(samples), 3),
+                "max": round(max(samples), 3),
+                "p50": round(statistics.median(samples), 3),
+                "p95": round(_percentile(samples, 95), 3),
+                "std_dev": round(
+                    statistics.pstdev(samples) if len(samples) > 1 else 0.0, 3
+                ),
+            }
+
+        render_summary = _summarise(render_times)
+        interval_summary = _summarise(intervals)
+
+        if intervals:
+            under_16_6 = sum(1 for dt in intervals if dt <= 16.6)
+            target_fraction = round(under_16_6 / len(intervals), 4)
+        else:
+            target_fraction = None
+
+        return {
+            "success": True,
+            "duration_seconds": duration,
+            "sample_count": len(render_times),
+            "render_cost_ms": render_summary,
+            "frame_interval_ms": interval_summary,
+            "average_frame_time_ms": render_summary["mean"] if render_summary else None,
+            "max_frame_time_ms": render_summary["max"] if render_summary else None,
+            "std_dev_ms": render_summary["std_dev"] if render_summary else None,
+            "target_fps_60_met_fraction": target_fraction,
+            "pid": pid,
+            "log_path": str(log_path),
         }
 
     @mcp.tool()
