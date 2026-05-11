@@ -18,6 +18,7 @@ from .tools import (
     register_screenshot_tools,
     register_telemetry_tools,
     register_logs_tools,
+    register_image_tools,
 )
 
 # Configure logging to stderr (required for MCP STDIO transport)
@@ -38,6 +39,7 @@ def register_all_tools() -> None:
     register_screenshot_tools(mcp)
     register_telemetry_tools(mcp)
     register_logs_tools(mcp)
+    register_image_tools(mcp)
 
     logger.info("All DevDash tools registered")
 
